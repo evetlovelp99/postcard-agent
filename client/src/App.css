@@ -362,6 +362,13 @@
   margin: 0 auto;
 }
 
+.guided-postcard-navigation {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+}
+
 .guided-postcard-mood {
   display: flex;
   flex-direction: column;

@@ -230,14 +230,6 @@ function PostcardOverlay({ onClose, children }) {
 
   return (
     <div className="postcard-overlay" role="dialog" aria-modal="true" aria-label="Postcard detail">
-      <button
-        type="button"
-        className="postcard-overlay__close"
-        aria-label="Close postcard"
-        onClick={onClose}
-      >
-        ×
-      </button>
       <div className="postcard-overlay__inner guided-step__inner guided-postcard-layout">{children}</div>
     </div>
   );
@@ -337,6 +329,8 @@ function PostcardDetailLayout({
   onChangeVibe,
   onSameVibeNewSpot,
   onViewHistory,
+  onClose,
+  onBackHome,
   isGenerating,
   detailCategory,
   collectedNumber,
@@ -351,6 +345,14 @@ function PostcardDetailLayout({
 
   return (
     <div className="guided-postcard-stack">
+      <div className="guided-postcard-navigation">
+        <button type="button" className="button button--ghost" onClick={onBackHome}>
+          Back to home
+        </button>
+        <button type="button" className="button button--ghost" aria-label="Close postcard" onClick={onClose}>
+          ✕
+        </button>
+      </div>
       <div className="guided-postcard-frame">
         <PostcardFlipCard
           captureRef={captureRef}
@@ -1067,6 +1069,9 @@ function App() {
   }, [historyItems, selectedPostcard]);
 
   const goToStep = useCallback((nextStep) => {
+    if (nextStep !== 5) {
+      syncShareUrl('');
+    }
     setStepVisible(false);
     window.setTimeout(() => {
       setStep(nextStep);
@@ -1095,6 +1100,7 @@ function App() {
 
   function closeHistoryOverlay() {
     setSelectedPostcard(null);
+    syncShareUrl('');
   }
 
   function navigateToHistory() {
@@ -1105,7 +1111,7 @@ function App() {
   function navigateToHome() {
     closeHistoryOverlay();
     setErrorMessage('');
-    goToStep(1);
+    goToStep(0);
   }
 
   async function navigateToPostcard(targetId) {
@@ -1962,10 +1968,9 @@ function App() {
                 showCreationActions
                 onChangeVibe={handleChangeVibe}
                 onSameVibeNewSpot={handleSameVibeNewSpot}
-                onViewHistory={() => {
-                  setSelectedPostcard(null);
-                  goToStep(6);
-                }}
+                onViewHistory={navigateToHistory}
+                onClose={navigateToHistory}
+                onBackHome={navigateToHome}
                 isGenerating={isGenerating}
                 detailCategory={detailCategory}
                 collectedNumber={selectedCollectedNumber}
@@ -1990,6 +1995,9 @@ function App() {
                 onClick={selectedHistoryCity ? handleHistoryCityBack : handleHistoryBack}
               >
                 {selectedHistoryCity ? 'Back to collection' : historyBackLabel}
+              </button>
+              <button type="button" className="button button--ghost" onClick={navigateToHome}>
+                Back to home
               </button>
             </div>
 
@@ -2107,6 +2115,8 @@ function App() {
                 onChangeVibe={handleChangeVibe}
                 onSameVibeNewSpot={handleSameVibeNewSpot}
                 onViewHistory={() => goToStep(6)}
+                onClose={closeHistoryOverlay}
+                onBackHome={navigateToHome}
                 isGenerating={isGenerating}
                 detailCategory={detailCategory}
                 collectedNumber={selectedCollectedNumber}
