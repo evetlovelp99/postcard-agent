@@ -1,0 +1,1175 @@
+.guided-app {
+  position: relative;
+  min-height: 100vh;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 20% 0%, rgba(142, 108, 75, 0.18), transparent 32%),
+    radial-gradient(circle at 80% 10%, rgba(74, 81, 124, 0.14), transparent 28%),
+    linear-gradient(180deg, #09090c 0%, #08080a 55%, #070709 100%);
+  color: #f7ead6;
+}
+
+.guided-app__grain {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.14;
+  background-image:
+    radial-gradient(circle, rgba(255, 255, 255, 0.18) 0.7px, transparent 0.8px),
+    linear-gradient(rgba(255, 255, 255, 0.04) 1px, transparent 1px);
+  background-size: 4px 4px, 100% 3px;
+  mix-blend-mode: soft-light;
+}
+
+.guided-landing-history {
+  position: absolute;
+  top: 24px;
+  right: 24px;
+  z-index: 2;
+}
+
+.guided-step {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 48px 24px 64px;
+  opacity: 0;
+  transition: opacity 320ms ease;
+}
+
+.guided-step--visible {
+  opacity: 1;
+}
+
+.guided-step--fading {
+  opacity: 0;
+}
+
+.guided-step__inner {
+  width: min(720px, 100%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 28px;
+  text-align: center;
+}
+
+.guided-hero-line {
+  margin: 0;
+  font-family: 'Cormorant Garamond', Georgia, 'Times New Roman', serif;
+  font-size: clamp(2.4rem, 6vw, 4.2rem);
+  font-weight: 600;
+  line-height: 1.12;
+  letter-spacing: -0.03em;
+  color: #f8eddc;
+  max-width: 18ch;
+}
+
+.guided-subline,
+.guided-hint {
+  margin: 0;
+  font-size: 1rem;
+  line-height: 1.6;
+  color: rgba(247, 234, 214, 0.72);
+}
+
+.guided-hint {
+  font-size: 0.82rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.guided-title {
+  margin: 0;
+  font-family: 'Cormorant Garamond', Georgia, 'Times New Roman', serif;
+  font-size: clamp(1.8rem, 4vw, 2.6rem);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: #f8eddc;
+}
+
+.guided-loading {
+  margin: 0;
+  font-size: 1.05rem;
+  color: rgba(247, 234, 214, 0.78);
+}
+
+.guided-loading--pulse {
+  animation: guidedPulse 1.8s ease-in-out infinite;
+}
+
+@keyframes guidedPulse {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+
+  50% {
+    opacity: 1;
+  }
+}
+
+.guided-scroll-hint {
+  margin-top: 12vh;
+  font-size: 0.78rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: rgba(247, 234, 214, 0.45);
+}
+
+.guided-card-grid {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 12px;
+  width: min(640px, 100%);
+  align-items: stretch;
+}
+
+.guided-card-grid--two {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.guided-select-card {
+  padding: 20px 16px;
+  border-radius: 18px;
+  border: 1px solid rgba(247, 234, 214, 0.14);
+  background: rgba(255, 255, 255, 0.03);
+  color: inherit;
+  cursor: pointer;
+  transition:
+    border-color 180ms ease,
+    background 180ms ease,
+    transform 180ms ease;
+}
+
+.guided-card-grid .guided-select-card {
+  /* Force all 5 preference buttons into a single row */
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.guided-select-card:hover,
+.guided-select-card:focus-visible {
+  border-color: rgba(232, 193, 153, 0.35);
+  transform: translateY(-1px);
+}
+
+.guided-select-card--active {
+  border-color: rgba(232, 193, 153, 0.5);
+  background: rgba(232, 193, 153, 0.12);
+}
+
+.guided-select-card__label {
+  font-size: 1rem;
+  font-weight: 500;
+  color: #f8eddc;
+}
+
+.guided-caption-input {
+  width: min(520px, 100%);
+  min-height: 120px;
+  padding: 16px 18px;
+  border-radius: 16px;
+  border: 1px solid rgba(247, 234, 214, 0.16);
+  background: rgba(8, 8, 12, 0.55);
+  color: #f8eddc;
+  resize: vertical;
+}
+
+.guided-caption-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(520px, 100%);
+}
+
+.guided-caption-counter {
+  margin: 0;
+  align-self: flex-end;
+  font-size: 0.78rem;
+  letter-spacing: 0.06em;
+  color: rgba(247, 234, 214, 0.48);
+}
+
+.guided-caption-input::placeholder {
+  color: rgba(247, 234, 214, 0.38);
+}
+
+.guided-field {
+  width: min(420px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  text-align: left;
+}
+
+.guided-field span {
+  font-size: 0.75rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(247, 234, 214, 0.58);
+}
+
+.guided-field input {
+  padding: 14px 16px;
+  border-radius: 14px;
+  border: 1px solid rgba(247, 234, 214, 0.16);
+  background: rgba(8, 8, 12, 0.55);
+  color: #f8eddc;
+}
+
+.guided-city-input-row {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+}
+
+.guided-city-input-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.guided-location-button {
+  flex-shrink: 0;
+  font-size: 1.1rem;
+}
+
+.guided-location-status {
+  margin: 0;
+  font-size: 0.88rem;
+  color: rgba(247, 234, 214, 0.62);
+}
+
+.guided-location-pill {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  margin: 0;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(247, 234, 214, 0.18);
+  background: rgba(255, 255, 255, 0.06);
+  font-size: 0.88rem;
+  color: rgba(247, 234, 214, 0.88);
+}
+
+.guided-location-error {
+  margin: 0;
+  font-size: 0.86rem;
+  color: rgba(247, 234, 214, 0.48);
+}
+
+.guided-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+}
+
+.guided-actions--postcard {
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  width: 100%;
+}
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 48px;
+  padding: 0 22px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    transform 160ms ease,
+    background 160ms ease,
+    border-color 160ms ease;
+}
+
+.button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.button:hover:not(:disabled),
+.button:focus-visible:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.button--primary {
+  color: #1a1410;
+  background: linear-gradient(135deg, #e8c199 0%, #d4a574 100%);
+  border-color: rgba(232, 193, 153, 0.4);
+}
+
+.button--ghost {
+  color: #f7ead6;
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(247, 234, 214, 0.18);
+}
+
+.button--icon {
+  min-width: 48px;
+  padding: 0;
+  font-size: 1.25rem;
+}
+
+.callout {
+  margin: 0;
+  padding: 12px 16px;
+  border-radius: 12px;
+  font-size: 0.92rem;
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(247, 234, 214, 0.88);
+}
+
+.callout--error {
+  background: rgba(159, 76, 66, 0.18);
+  color: #f5d4cf;
+}
+
+.callout--success {
+  background: rgba(115, 176, 135, 0.16);
+  color: #dff3e5;
+}
+
+.guided-step__inner.guided-postcard-layout {
+  width: min(680px, 100%);
+  align-items: stretch;
+  gap: 0;
+  text-align: left;
+}
+
+.guided-postcard-layout {
+  width: 100%;
+}
+
+.guided-postcard-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 24px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.guided-postcard-mood {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.guided-postcard-footer {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  width: 100%;
+  margin-top: 4px;
+}
+
+.guided-postcard-meta {
+  margin: 0;
+  font-family: 'Cormorant Garamond', Georgia, 'Times New Roman', serif;
+  font-size: 1.35rem;
+  line-height: 1.2;
+  color: #f8eddc;
+}
+
+.guided-postcard-location {
+  margin: 0;
+  font-size: 0.78rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(247, 234, 214, 0.5);
+}
+
+.guided-postcard-frame {
+  position: relative;
+  width: min(520px, 100%);
+  margin: 0 auto;
+  perspective: 1400px;
+}
+
+.guided-postcard-frame__loading {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: rgba(8, 8, 10, 0.62);
+  backdrop-filter: blur(2px);
+}
+
+.guided-postcard-frame__loading-text {
+  margin: 0;
+  font-size: 1rem;
+  letter-spacing: 0.04em;
+}
+
+.postcard-flip-scene {
+  display: block;
+  width: 100%;
+  aspect-ratio: 520 / 380;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+  box-shadow:
+    0 28px 64px rgba(0, 0, 0, 0.42),
+    0 10px 28px rgba(0, 0, 0, 0.24);
+}
+
+.postcard-flip-card {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  transform-style: preserve-3d;
+}
+
+.postcard-flip-scene--flipped .postcard-flip-card {
+  transform: rotateY(180deg);
+}
+
+.postcard-flip-face {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border-radius: 8px;
+  overflow: hidden;
+  backface-visibility: hidden;
+  transform-style: preserve-3d;
+}
+
+.postcard-flip-face--back {
+  transform: rotateY(180deg);
+}
+
+.postcard-photo {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  width: 100%;
+  height: 100%;
+  background: var(--photo-gradient, #1d2334);
+}
+
+.postcard-photo__image {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
+  pointer-events: none;
+}
+
+.postcard-photo::before,
+.postcard-photo::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.postcard-photo::before {
+  z-index: -1;
+  background:
+    radial-gradient(circle at 18% 22%, rgba(255, 245, 222, 0.3), transparent 18%),
+    radial-gradient(circle at 82% 18%, rgba(255, 255, 255, 0.12), transparent 20%),
+    radial-gradient(circle at 50% 82%, rgba(13, 20, 35, 0.48), transparent 28%);
+  mix-blend-mode: screen;
+}
+
+.postcard-photo::after {
+  opacity: 0.3;
+  background-image:
+    radial-gradient(circle, rgba(255, 255, 255, 0.22) 0.7px, transparent 0.8px),
+    linear-gradient(180deg, transparent 0%, rgba(20, 17, 14, 0.42) 100%);
+  background-size: 4px 4px, 100% 100%;
+}
+
+.postcard-caption-inscription {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 2;
+  padding: 52px 26px 24px;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    transparent 0%,
+    rgba(8, 10, 18, 0.35) 38%,
+    rgba(8, 10, 18, 0.78) 100%
+  );
+}
+
+.postcard-caption-inscription__text {
+  margin: 0;
+  max-width: 92%;
+  font-family: 'Caveat', 'Bradley Hand', 'Segoe Print', 'Marker Felt', cursive;
+  font-style: italic;
+  font-size: clamp(1.35rem, 3.2vw, 1.75rem);
+  line-height: 1.35;
+  color: #fff9ef;
+  text-shadow: 0 2px 18px rgba(0, 0, 0, 0.45);
+}
+
+.postcard-back {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #141820;
+}
+
+.postcard-back--paper {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.18), transparent 28%),
+    #efe4d0;
+}
+
+.postcard-back__content {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
+  gap: 18px;
+  height: 100%;
+  padding: 24px;
+}
+
+.postcard-back__content--simple {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  justify-content: center;
+  max-width: 72%;
+  padding: 28px 32px;
+}
+
+.postcard-back__left {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  justify-content: center;
+}
+
+.postcard-back__meta-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.postcard-back__meta-label {
+  font-size: 0.58rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: rgba(58, 42, 31, 0.56);
+}
+
+.postcard-back__meta-value {
+  font-size: 0.92rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: #3a2a1f;
+}
+
+.postcard-back__caption {
+  margin: 8px 0 0;
+  padding-top: 12px;
+  border-top: 1px solid rgba(58, 42, 31, 0.14);
+  font-family: 'Caveat', 'Bradley Hand', 'Segoe Print', 'Marker Felt', cursive;
+  font-style: italic;
+  font-size: clamp(1rem, 2.2vw, 1.35rem);
+  line-height: 1.35;
+  color: #3a2a1f;
+}
+
+.postcard-back__image {
+  position: absolute;
+  inset: -12px;
+  z-index: 0;
+  display: block;
+  width: calc(100% + 24px);
+  height: calc(100% + 24px);
+  object-fit: cover;
+  object-position: center;
+  filter: blur(8px) brightness(0.35);
+  pointer-events: none;
+}
+
+.postcard-back__image--empty {
+  background: #1d2334;
+  filter: none;
+}
+
+.postcard-back__writing {
+  position: absolute;
+  top: 28px;
+  left: 28px;
+  z-index: 2;
+  width: 48%;
+  height: calc(100% - 96px);
+  pointer-events: none;
+}
+
+.postcard-back__lines {
+  position: absolute;
+  inset: 0;
+  background-image: repeating-linear-gradient(
+    180deg,
+    transparent 0,
+    transparent 27px,
+    rgba(255, 249, 239, 0.14) 27px,
+    rgba(255, 249, 239, 0.14) 28px
+  );
+  background-position: 0 18px;
+}
+
+.postcard-back__message {
+  position: relative;
+  z-index: 1;
+  margin: 14px 0 0;
+  padding-right: 8px;
+  font-family: 'Caveat', 'Bradley Hand', 'Segoe Print', 'Marker Felt', cursive;
+  font-style: italic;
+  font-size: clamp(1.1rem, 2.4vw, 1.45rem);
+  line-height: 28px;
+  color: rgba(255, 249, 239, 0.92);
+  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.35);
+}
+
+.postcard-back__location {
+  position: absolute;
+  left: 28px;
+  bottom: 22px;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  pointer-events: none;
+}
+
+.postcard-back__city,
+.postcard-back__place {
+  font-size: 0.62rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(255, 249, 239, 0.58);
+}
+
+.postcard-back__city {
+  font-weight: 600;
+  color: rgba(255, 249, 239, 0.72);
+}
+
+.email-send-panel {
+  width: min(420px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.email-send-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  text-align: left;
+}
+
+.email-send-field span {
+  font-size: 0.75rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(247, 234, 214, 0.58);
+}
+
+.email-send-field input {
+  padding: 14px 16px;
+  border-radius: 14px;
+  border: 1px solid rgba(247, 234, 214, 0.16);
+  background: rgba(8, 8, 12, 0.55);
+  color: #f8eddc;
+}
+
+.email-send-submit {
+  align-self: center;
+}
+
+.postcard-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  overflow-y: auto;
+  padding: 56px 20px 32px;
+  background: #08080a;
+}
+
+.postcard-overlay__close {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 101;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 1px solid rgba(247, 234, 214, 0.18);
+  border-radius: 10px;
+  background: rgba(8, 8, 10, 0.88);
+  color: rgba(247, 234, 214, 0.88);
+  font-size: 1.5rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.postcard-overlay__close:hover,
+.postcard-overlay__close:focus-visible {
+  border-color: rgba(232, 193, 153, 0.45);
+  color: #f9efdf;
+}
+
+.postcard-overlay__inner {
+  width: min(680px, 100%);
+  margin: 0 auto;
+}
+
+.guided-history {
+  width: min(1080px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+}
+
+.guided-history__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  margin-bottom: 2rem;
+}
+
+.guided-history-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 2rem;
+  width: 100%;
+}
+
+.history-favorites-group {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+}
+
+.history-favorites-group__header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+}
+
+.history-favorites-group__name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(232, 193, 153, 0.88);
+  white-space: nowrap;
+}
+
+.history-favorites-group__heart {
+  font-size: 14px;
+  line-height: 1;
+  color: #e8c199;
+}
+
+.history-favorites-group__line {
+  flex: 1;
+  height: 1px;
+  background: rgba(232, 193, 153, 0.22);
+}
+
+.history-country-group {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.history-country-group__header,
+.history-city-group__header,
+.history-favorites-group__header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.history-country-group__name {
+  font-size: 0.92rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: rgba(247, 234, 214, 0.72);
+}
+
+.history-country-group__line,
+.history-city-group__line,
+.history-favorites-group__line {
+  flex: 1;
+  height: 1px;
+  background: rgba(247, 234, 214, 0.12);
+}
+
+.history-city-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 14px;
+}
+
+.history-city-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 14px 16px;
+  border: 1px solid rgba(247, 234, 214, 0.12);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.03);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    transform 160ms ease,
+    border-color 160ms ease,
+    background 160ms ease;
+}
+
+.history-city-card:hover,
+.history-city-card:focus-visible {
+  transform: translateY(-1px);
+  border-color: rgba(247, 234, 214, 0.24);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.history-city-card__body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.history-city-card__name {
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: #f8eddc;
+}
+
+.history-city-card__meta {
+  font-size: 0.82rem;
+  color: rgba(247, 234, 214, 0.56);
+}
+
+.history-city-detail {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 14px;
+}
+
+.history-city-detail__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.history-city-detail__title {
+  margin: 0;
+  font-family: 'Cormorant Garamond', Georgia, 'Times New Roman', serif;
+  font-size: clamp(1.6rem, 4vw, 2rem);
+  font-weight: 500;
+  line-height: 1.15;
+  color: #f8eddc;
+}
+
+.history-city-detail__meta {
+  margin: 0;
+  font-size: 0.88rem;
+  color: rgba(247, 234, 214, 0.58);
+}
+
+.postcard-ready {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  text-align: center;
+}
+
+.postcard-ready__city {
+  margin: 0;
+  font-family: 'Cormorant Garamond', Georgia, 'Times New Roman', serif;
+  font-size: clamp(1.6rem, 4vw, 2.2rem);
+  color: #f8eddc;
+}
+
+.postcard-ready__stamp-row {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.postcard-ready__subtitle {
+  margin: 0;
+  font-size: 0.82rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: rgba(247, 234, 214, 0.52);
+}
+
+.postcard-ready__count {
+  margin: 0;
+  font-size: 0.92rem;
+  color: rgba(247, 234, 214, 0.68);
+}
+
+.postcard-ready__actions {
+  margin-top: 8px;
+}
+
+.history-city-group {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+}
+
+.history-city-group__header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+}
+
+.history-city-group__name {
+  font-size: 13px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(247, 234, 214, 0.45);
+  white-space: nowrap;
+}
+
+.history-city-group__line {
+  flex: 1;
+  height: 1px;
+  background: rgba(247, 234, 214, 0.14);
+}
+
+.guided-history-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 16px;
+  width: 100%;
+}
+
+.history-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid rgba(247, 234, 214, 0.12);
+  border-radius: 16px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.03);
+  color: inherit;
+  transition:
+    border-color 160ms ease,
+    transform 160ms ease;
+}
+
+.history-card:hover,
+.history-card:focus-within {
+  border-color: rgba(232, 193, 153, 0.35);
+  transform: translateY(-2px);
+}
+
+.history-card__select {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.card-actions {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  display: flex;
+  gap: 6px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 160ms ease;
+}
+
+.history-card:hover .card-actions,
+.history-card:focus-within .card-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.card-action-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid rgba(247, 234, 214, 0.18);
+  border-radius: 8px;
+  background: rgba(8, 8, 10, 0.72);
+  color: rgba(247, 234, 214, 0.82);
+  cursor: pointer;
+}
+
+.card-action-button:hover,
+.card-action-button:focus-visible {
+  border-color: rgba(232, 193, 153, 0.45);
+  color: #f9efdf;
+}
+
+.card-action-icon {
+  display: block;
+}
+
+.card-action-icon--filled {
+  color: #e8c199;
+}
+
+.history-card__confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 100%;
+  padding: 16px 14px;
+  justify-content: center;
+}
+
+.history-card__confirm-text {
+  margin: 0;
+  font-size: 0.9rem;
+  color: rgba(247, 234, 214, 0.78);
+}
+
+.history-card__confirm-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.history-card__confirm-button {
+  min-height: 32px;
+  padding: 0 12px;
+  font-size: 0.82rem;
+}
+
+.history-card__thumb {
+  aspect-ratio: 4 / 5;
+  width: 100%;
+  object-fit: cover;
+  background: #1d2334;
+}
+
+.history-card__thumb--empty {
+  display: block;
+  background: linear-gradient(135deg, #1d2334, #4b536b);
+}
+
+.history-card__body {
+  padding: 12px 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.history-card__date {
+  font-size: 0.72rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: rgba(247, 234, 214, 0.48);
+}
+
+.history-card__caption {
+  font-family: 'Caveat', 'Bradley Hand', 'Segoe Print', 'Marker Felt', cursive;
+  font-size: 1.05rem;
+  line-height: 1.35;
+  color: rgba(251, 241, 228, 0.88);
+}
+
+.guided-muted {
+  margin: 0;
+  color: rgba(247, 234, 214, 0.55);
+}
+
+@media (max-width: 640px) {
+  .guided-step {
+    padding: 32px 16px 48px;
+  }
+
+  .guided-card-grid--two {
+    grid-template-columns: 1fr;
+  }
+
+  .guided-actions:not(.guided-actions--postcard) {
+    flex-direction: column;
+    width: 100%;
+  }
+
+  .guided-actions:not(.guided-actions--postcard) .button {
+    width: 100%;
+  }
+
+  .guided-actions--postcard .button:not(.button--icon) {
+    flex: 1 1 calc(50% - 6px);
+    min-width: 0;
+    padding: 0 14px;
+    font-size: 0.9rem;
+  }
+
+  .guided-history__header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}

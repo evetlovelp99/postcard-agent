@@ -1,0 +1,4809 @@
+===== package.json
+{
+  "name": "postcard-agent",
+  "version": "1.0.0",
+  "description": "Express backend for generating and storing city postcard atmospheres.",
+  "main": "src/server.js",
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "check": "node --check src/server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@google-cloud/aiplatform": "^6.7.0",
+    "@google-cloud/vertexai": "^1.12.0",
+    "@google/generative-ai": "^0.24.1",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "mongodb": "^7.2.0",
+    "nodemailer": "^8.0.7",
+    "resend": "^6.12.3"
+  }
+}
+===== src/app.js
+require('dotenv').config();
+
+const cors = require('cors');
+const express = require('express');
+
+const { errorHandler } = require('./middleware/errorHandler');
+const postcardRoutes = require('./routes/postcardRoutes');
+
+const app = express();
+
+app.use(cors({
+  origin: true,
+  credentials: true,
+}));
+app.use(express.json({ limit: '15mb' }));
+
+app.use('/api', postcardRoutes);
+
+app.use((_req, res) => {
+  return res.status(404).json({
+    success: false,
+    error: 'Route not found.',
+  });
+});
+
+app.use(errorHandler);
+
+module.exports = app;
+===== src/server.js
+const app = require('./app');
+const { closeMongoConnection } = require('./config/database');
+
+const port = Number.parseInt(process.env.PORT, 10) || 3000;
+
+const server = app.listen(port, () => {
+  console.log(`PostCard Agent API listening on http://localhost:${port}`);
+});
+
+async function shutdown(signal) {
+  console.log(`\nReceived ${signal}. Shutting down gracefully...`);
+
+  server.close(async () => {
+    try {
+      await closeMongoConnection();
+      console.log('MongoDB connection closed.');
+      process.exit(0);
+    } catch (error) {
+      console.error('Failed to close MongoDB connection cleanly:', error);
+      process.exit(1);
+    }
+  });
+}
+
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+===== src/config/database.js
+const { MongoClient, ServerApiVersion } = require('mongodb');
+
+const DEFAULT_DB_NAME = process.env.MONGODB_DB_NAME || 'postcard';
+
+let clientPromise = null;
+let indexesPromise = null;
+
+async function getMongoClient() {
+  if (!process.env.MONGODB_URI) {
+    throw new Error('Missing MONGODB_URI environment variable.');
+  }
+
+  if (!clientPromise) {
+    const client = new MongoClient(process.env.MONGODB_URI, {
+      serverApi: ServerApiVersion.v1,
+      tls: true,
+      tlsAllowInvalidCertificates: true,
+      tlsAllowInvalidHostnames: true,
+    });
+
+    clientPromise = client.connect().catch((error) => {
+      clientPromise = null;
+      throw error;
+    });
+  }
+
+  return clientPromise;
+}
+
+async function ensureIndexes(database) {
+  if (!indexesPromise) {
+    indexesPromise = Promise.all([
+      database.collection('postcards').createIndex({ userId: 1, createdAt: -1 }),
+      database.collection('postcards').createIndex({ travelerId: 1, createdAt: -1 }),
+      database.collection('postcards').createIndex({ city: 1, createdAt: -1 }),
+      database
+        .collection('cities')
+        .createIndex({ userId: 1, cityName: 1, countryName: 1 }, { unique: true }),
+      database.collection('cities').createIndex({ userId: 1, updatedAt: -1 }),
+    ]).catch((error) => {
+      indexesPromise = null;
+      throw error;
+    });
+  }
+
+  await indexesPromise;
+}
+
+async function getDatabase() {
+  const client = await getMongoClient();
+  const database = client.db(DEFAULT_DB_NAME);
+
+  await ensureIndexes(database);
+
+  return database;
+}
+
+async function closeMongoConnection() {
+  if (!clientPromise) {
+    return;
+  }
+
+  const client = await clientPromise;
+  await client.close();
+  clientPromise = null;
+  indexesPromise = null;
+}
+
+module.exports = {
+  closeMongoConnection,
+  getDatabase,
+};
+===== src/middleware/errorHandler.js
+function errorHandler(error, _req, res, _next) {
+  console.error(error);
+
+  return res.status(500).json({
+    success: false,
+    error: error.message || 'Internal server error.',
+  });
+}
+
+module.exports = {
+  errorHandler,
+};
+===== src/routes/postcardRoutes.js
+const express = require('express');
+
+const {
+  createPostcard,
+  deletePostcard,
+  generateDetailPanel,
+  generatePostcardCaptionForPostcard,
+  getHealth,
+  getPostcardById,
+  getRecentPostcards,
+  sendPostcardEmailHandler,
+  setPostcardFavorite,
+} = require('../controllers/postcardController');
+const { reverseGeocode } = require('../controllers/geolocationController');
+
+const router = express.Router();
+
+router.get('/health', getHealth);
+router.get('/geolocation/reverse', reverseGeocode);
+router.post('/send-postcard', sendPostcardEmailHandler);
+router.get('/postcards', getRecentPostcards);
+router.post('/postcards/detail-panel', generateDetailPanel);
+router.post('/postcards/:id/generate-caption', generatePostcardCaptionForPostcard);
+router.get('/postcards/:id', getPostcardById);
+router.patch('/postcards/:id/favorite', setPostcardFavorite);
+router.delete('/postcards/:id', deletePostcard);
+router.post('/postcards', createPostcard);
+
+module.exports = router;
+===== src/controllers/geolocationController.js
+function pickEnglishCityName(data) {
+  const address = data.address || {};
+  const namedetails = data.namedetails || {};
+
+  const fromColonEn =
+    (address['city:en'] && String(address['city:en']).trim()) ||
+    (address['town:en'] && String(address['town:en']).trim()) ||
+    (address['village:en'] && String(address['village:en']).trim()) ||
+    '';
+
+  if (fromColonEn) {
+    return fromColonEn;
+  }
+
+  const fromNamedetails =
+    (namedetails['name:en'] && String(namedetails['name:en']).trim()) ||
+    (namedetails['official_name:en'] && String(namedetails['official_name:en']).trim()) ||
+    '';
+
+  if (fromNamedetails) {
+    return fromNamedetails;
+  }
+
+  return (
+    (address.city && String(address.city).trim()) ||
+    (address.town && String(address.town).trim()) ||
+    (address.village && String(address.village).trim()) ||
+    ''
+  );
+}
+
+async function reverseGeocode(req, res, next) {
+  try {
+    const lat = Number.parseFloat(req.query.lat);
+    const lon = Number.parseFloat(req.query.lon);
+
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Valid lat and lon query parameters are required.',
+      });
+    }
+
+    const nominatimUrl = new URL('https://nominatim.openstreetmap.org/reverse');
+    nominatimUrl.searchParams.set('lat', String(lat));
+    nominatimUrl.searchParams.set('lon', String(lon));
+    nominatimUrl.searchParams.set('format', 'json');
+    nominatimUrl.searchParams.set('accept-language', 'en');
+    nominatimUrl.searchParams.set('namedetails', '1');
+
+    const response = await fetch(nominatimUrl, {
+      headers: {
+        'User-Agent': 'PostCardAgent/1.0',
+        Accept: 'application/json',
+        'Accept-Language': 'en',
+      },
+    });
+
+    if (!response.ok) {
+      return res.status(502).json({
+        success: false,
+        error: 'Reverse geocoding service returned an error.',
+      });
+    }
+
+    const data = await response.json();
+    const cityName = pickEnglishCityName(data);
+    const address = data.address || {};
+    const country =
+      (address['country:en'] && String(address['country:en']).trim()) ||
+      (address.country && String(address.country).trim()) ||
+      '';
+
+    if (!cityName) {
+      return res.status(404).json({
+        success: false,
+        error: 'Could not determine a city name for this location.',
+      });
+    }
+
+    return res.json({
+      success: true,
+      data: { city: cityName, country },
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
+module.exports = {
+  reverseGeocode,
+};
+===== src/controllers/postcardController.js
+const { ObjectId } = require('mongodb');
+
+const { getDatabase } = require('../config/database');
+const {
+  generateCityAtmosphere,
+  generatePostcardCaption,
+  generatePostcardDetailPanel,
+  pickAnchorLocation,
+  preferencesToCategory,
+  DETAIL_PANEL_CATEGORIES,
+} = require('../services/geminiService');
+const { generatePostcardImage } = require('../services/imageService');
+const { isSmtpConfigured, sendPostcardEmail } = require('../services/mailService');
+const {
+  enrichPostcardsWithAiStamps,
+  getOrCreateCityAiStamp,
+  normalizeCityName,
+} = require('../services/cityService');
+const { buildUserIdQuery, getUserId } = require('../utils/userId');
+
+function normalizeLimit(value, fallback = 50) {
+  const parsed = Number.parseInt(value, 10);
+
+  if (Number.isNaN(parsed) || parsed <= 0) {
+    return fallback;
+  }
+
+  return Math.min(parsed, 100);
+}
+
+const ALLOWED_PREFERENCES = new Set([
+  'Landmarks',
+  'Food',
+  'Quiet Moments',
+  'Nightlife',
+  'Nature',
+]);
+
+const PREFERENCE_ID_MAP = {
+  landmarks: 'Landmarks',
+  food: 'Food',
+  quiet: 'Quiet Moments',
+  nightlife: 'Nightlife',
+  nature: 'Nature',
+};
+
+function normalizePreferences(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const normalized = [];
+
+  for (const item of value) {
+    const trimmed = String(item).trim();
+
+    if (!trimmed) {
+      continue;
+    }
+
+    if (ALLOWED_PREFERENCES.has(trimmed)) {
+      normalized.push(trimmed);
+      continue;
+    }
+
+    const fromId = PREFERENCE_ID_MAP[trimmed.toLowerCase()];
+
+    if (fromId) {
+      normalized.push(fromId);
+    }
+  }
+
+  return [...new Set(normalized)];
+}
+
+async function createPostcard(req, res, next) {
+  try {
+    const city = normalizeCityName(req.body?.city);
+    const countryName = String(req.body?.countryName || '').trim();
+    const userId = getUserId(req);
+    const preferences = normalizePreferences(req.body?.preferences);
+    const regenerate = Boolean(req.body?.regenerate);
+    const previousAnchorName = String(req.body?.previousAnchorName || '').trim();
+
+    if (!city) {
+      return res.status(400).json({
+        success: false,
+        error: 'The "city" field is required.',
+      });
+    }
+
+    const database = await getDatabase();
+    const postcardsCollection = database.collection('postcards');
+
+    let stampResult = {
+      aiStamp: null,
+      cityId: null,
+      countryName: countryName || '',
+      isNew: false,
+    };
+
+    try {
+      stampResult = await getOrCreateCityAiStamp(database, userId, city, countryName);
+    } catch (stampError) {
+      console.error('AI stamp generation failed:', stampError.message);
+    }
+
+    const recentMemories = await postcardsCollection
+      .find(
+        buildUserIdQuery(userId),
+        {
+          projection: {
+            city: 1,
+            atmosphere: 1,
+            createdAt: 1,
+          },
+        }
+      )
+      .sort({ createdAt: -1 })
+      .limit(5)
+      .toArray();
+
+    // Step 1: Pick one anchor location for image + copy
+    const anchorLocation = await pickAnchorLocation({
+      city,
+      preferences,
+      regenerate,
+      previousAnchorName,
+    });
+
+    // Step 2: Generate city atmosphere grounded to the anchor
+    const generated = await generateCityAtmosphere({
+      city,
+      travelerId: userId,
+      recentMemories,
+      preferences,
+      anchorLocation,
+    });
+
+    generated.atmosphere.preferences = preferences;
+    generated.atmosphere.anchorLocation = anchorLocation;
+
+    // Step 3: Generate postcard image at the same anchor
+    let imageData = null;
+    try {
+      imageData = await generatePostcardImage(generated.atmosphere, city, anchorLocation);
+    } catch (imageError) {
+      // Image generation is non-blocking — postcard still saves without image
+      console.error('Image generation failed:', imageError.message);
+    }
+
+    const category = preferencesToCategory(preferences);
+    let caption = null;
+
+    if (imageData?.imageBase64) {
+      try {
+        const imageUrl = `data:${imageData.mimeType || 'image/png'};base64,${imageData.imageBase64}`;
+        caption = await generatePostcardCaption({ city, category, imageUrl });
+      } catch (captionError) {
+        console.error('Caption generation failed:', captionError.message);
+      }
+    }
+
+    const postcard = {
+      userId,
+      travelerId: userId,
+      city,
+      countryName: stampResult.countryName,
+      cityId: stampResult.cityId,
+      aiStamp: stampResult.aiStamp,
+      isFavorited: false,
+      atmosphere: generated.atmosphere,
+      caption,
+      image: imageData
+        ? {
+            base64: imageData.imageBase64,
+            mimeType: imageData.mimeType,
+            prompt: imageData.prompt,
+          }
+        : null,
+      prompt: generated.prompt,
+      model: generated.model,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    const result = await postcardsCollection.insertOne(postcard);
+
+    return res.status(201).json({
+      success: true,
+      data: {
+        id: result.insertedId.toString(),
+        userId,
+        travelerId: userId,
+        city,
+        countryName: postcard.countryName,
+        cityId: postcard.cityId,
+        aiStamp: postcard.aiStamp,
+        stampIsNew: stampResult.isNew,
+        atmosphere: postcard.atmosphere,
+        caption: postcard.caption,
+        image: postcard.image,
+        memoryContextCount: recentMemories.length,
+        createdAt: postcard.createdAt,
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
+async function getRecentPostcards(req, res, next) {
+  try {
+    const userId = getUserId(req);
+    const limit = normalizeLimit(req.query?.limit, 50);
+
+    const database = await getDatabase();
+    const postcards = await database
+      .collection('postcards')
+      .find(buildUserIdQuery(userId))
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .toArray();
+
+    const enrichedPostcards = await enrichPostcardsWithAiStamps(database, userId, postcards);
+
+    return res.json({
+      success: true,
+      data: enrichedPostcards.map((postcard) => ({
+        ...postcard,
+        _id: postcard._id.toString(),
+      })),
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
+async function deletePostcard(req, res, next) {
+  try {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid postcard id.',
+      });
+    }
+
+    const database = await getDatabase();
+    const result = await database
+      .collection('postcards')
+      .deleteOne({ _id: new ObjectId(id) });
+
+    if (result.deletedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Postcard not found.',
+      });
+    }
+
+    return res.json({
+      success: true,
+      data: { deleted: true },
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
+async function setPostcardFavorite(req, res, next) {
+  try {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid postcard id.',
+      });
+    }
+
+    const isFavorited = Boolean(req.body?.isFavorited);
+    const database = await getDatabase();
+    const result = await database.collection('postcards').findOneAndUpdate(
+      { _id: new ObjectId(id) },
+      { $set: { isFavorited, updatedAt: new Date() } },
+      { returnDocument: 'after' }
+    );
+
+    if (!result) {
+      return res.status(404).json({
+        success: false,
+        error: 'Postcard not found.',
+      });
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        id: result._id.toString(),
+        isFavorited: Boolean(result.isFavorited),
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
+async function getPostcardById(req, res, next) {
+  try {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid postcard id.',
+      });
+    }
+
+    const database = await getDatabase();
+    const postcard = await database
+      .collection('postcards')
+      .findOne({ _id: new ObjectId(id) });
+
+    if (!postcard) {
+      return res.status(404).json({
+        success: false,
+        error: 'Postcard not found.',
+      });
+    }
+
+    const userId = postcard.userId || postcard.travelerId || getUserId(req);
+    const [enrichedPostcard] = await enrichPostcardsWithAiStamps(database, userId, [postcard]);
+
+    return res.json({
+      success: true,
+      data: {
+        ...enrichedPostcard,
+        _id: enrichedPostcard._id.toString(),
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
+async function generateDetailPanel(req, res, next) {
+  try {
+    const city = req.body?.city?.trim();
+    const category = String(req.body?.category || '')
+      .trim()
+      .toLowerCase();
+
+    if (!city) {
+      return res.status(400).json({
+        success: false,
+        error: 'The "city" field is required.',
+      });
+    }
+
+    if (!DETAIL_PANEL_CATEGORIES.has(category)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid category. Use landmarks, food, nightlife, nature, or quiet.',
+      });
+    }
+
+    const anchorLocation = req.body?.anchorLocation;
+
+    if (!anchorLocation?.location) {
+      return res.status(400).json({
+        success: false,
+        error: 'anchorLocation with location is required.',
+      });
+    }
+
+    const data = await generatePostcardDetailPanel({ city, category, anchorLocation });
+
+    return res.json({
+      success: true,
+      data,
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
+async function getHealth(_req, res) {
+  return res.json({
+    success: true,
+    data: {
+      status: 'ok',
+      service: 'postcard-agent-api',
+      timestamp: new Date().toISOString(),
+    },
+  });
+}
+
+async function generatePostcardCaptionForPostcard(req, res, next) {
+  try {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid postcard id.',
+      });
+    }
+
+    const database = await getDatabase();
+    const postcardsCollection = database.collection('postcards');
+    const postcard = await postcardsCollection.findOne({ _id: new ObjectId(id) });
+
+    if (!postcard) {
+      return res.status(404).json({
+        success: false,
+        error: 'Postcard not found.',
+      });
+    }
+
+    const travelerId = postcard.travelerId || 'demo-user';
+
+    if (!postcard.image?.base64) {
+      return res.status(400).json({
+        success: false,
+        error: 'Postcard has no image. Caption requires a generated photo.',
+      });
+    }
+
+    const category = preferencesToCategory(postcard.atmosphere?.preferences);
+    const mimeType = postcard.image.mimeType || 'image/png';
+    const imageUrl = `data:${mimeType};base64,${postcard.image.base64}`;
+
+    const caption = await generatePostcardCaption({
+      city: postcard.city,
+      category,
+      imageUrl,
+    });
+
+    await postcardsCollection.updateOne(
+      { _id: postcard._id },
+      { $set: { caption, updatedAt: new Date() } }
+    );
+
+    return res.json({
+      success: true,
+      data: { caption },
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
+async function sendPostcardEmailHandler(req, res) {
+  try {
+    if (!isSmtpConfigured()) {
+      return res.status(503).json({
+        success: false,
+        error: 'Email is not configured. Set SMTP_USER and SMTP_PASS in your environment.',
+      });
+    }
+
+    const { recipientEmail, postcardImageBase64, caption, city } = req.body || {};
+
+    if (!recipientEmail || typeof recipientEmail !== 'string' || !recipientEmail.includes('@')) {
+      return res.status(400).json({
+        success: false,
+        error: 'A valid recipientEmail is required.',
+      });
+    }
+
+    await sendPostcardEmail({
+      recipientEmail: recipientEmail.trim(),
+      postcardImageBase64,
+      caption: typeof caption === 'string' ? caption : '',
+      city: typeof city === 'string' && city.trim() ? city.trim() : 'Postcard',
+    });
+
+    return res.json({
+      success: true,
+      data: { sent: true },
+    });
+  } catch (error) {
+    return res.status(502).json({
+      success: false,
+      error: error.message || 'Failed to send email.',
+    });
+  }
+}
+
+module.exports = {
+  createPostcard,
+  deletePostcard,
+  generateDetailPanel,
+  generatePostcardCaptionForPostcard,
+  getHealth,
+  getPostcardById,
+  getRecentPostcards,
+  sendPostcardEmailHandler,
+  setPostcardFavorite,
+};===== src/services/cityService.js
+const { generateCityAiStamp } = require('./geminiService');
+
+function normalizeCityName(city) {
+  const trimmed = String(city || '').trim();
+
+  if (!trimmed) {
+    return '';
+  }
+
+  return trimmed
+    .toLowerCase()
+    .split(/\s+/)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ');
+}
+
+function normalizeCountryName(country) {
+  const trimmed = String(country || '').trim();
+
+  if (!trimmed) {
+    return '';
+  }
+
+  return trimmed
+    .toLowerCase()
+    .split(/\s+/)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ');
+}
+
+async function getOrCreateCityAiStamp(database, userId, cityName, countryName = '') {
+  const citiesCollection = database.collection('cities');
+  const normalizedCity = normalizeCityName(cityName);
+  const normalizedCountry = normalizeCountryName(countryName);
+
+  if (!normalizedCity) {
+    throw new Error('A city name is required to create an AI stamp.');
+  }
+
+  const lookup = {
+    userId,
+    cityName: normalizedCity,
+    countryName: normalizedCountry,
+  };
+
+  const existingCity = await citiesCollection.findOne(lookup);
+
+  if (existingCity?.aiStamp) {
+    return {
+      aiStamp: existingCity.aiStamp,
+      cityId: existingCity._id.toString(),
+      countryName: existingCity.countryName || normalizedCountry,
+      isNew: false,
+    };
+  }
+
+  const generatedStamp = await generateCityAiStamp(normalizedCity, normalizedCountry || 'Unknown');
+  const now = new Date();
+  const aiStamp = {
+    ...generatedStamp,
+    createdAt: now,
+  };
+  const resolvedCountry = normalizedCountry || generatedStamp.country || 'Unknown';
+
+  if (existingCity) {
+    await citiesCollection.updateOne(
+      { _id: existingCity._id },
+      {
+        $set: {
+          aiStamp,
+          countryName: resolvedCountry,
+          updatedAt: now,
+        },
+      }
+    );
+
+    return {
+      aiStamp,
+      cityId: existingCity._id.toString(),
+      countryName: resolvedCountry,
+      isNew: true,
+    };
+  }
+
+  const insertResult = await citiesCollection.insertOne({
+    userId,
+    cityName: normalizedCity,
+    countryName: resolvedCountry,
+    aiStamp,
+    createdAt: now,
+    updatedAt: now,
+  });
+
+  return {
+    aiStamp,
+    cityId: insertResult.insertedId.toString(),
+    countryName: resolvedCountry,
+    isNew: true,
+  };
+}
+
+async function enrichPostcardsWithAiStamps(database, userId, postcards) {
+  if (!Array.isArray(postcards) || postcards.length === 0) {
+    return postcards;
+  }
+
+  const cityDocs = await database.collection('cities').find({ userId }).toArray();
+  const stampByExactKey = new Map();
+  const stampByCityOnly = new Map();
+
+  for (const cityDoc of cityDocs) {
+    if (!cityDoc?.aiStamp) {
+      continue;
+    }
+
+    const cityKey = normalizeCityName(cityDoc.cityName);
+    const countryKey = normalizeCountryName(cityDoc.countryName);
+    stampByExactKey.set(`${cityKey}::${countryKey}`, cityDoc.aiStamp);
+
+    if (!stampByCityOnly.has(cityKey)) {
+      stampByCityOnly.set(cityKey, cityDoc.aiStamp);
+    }
+  }
+
+  return postcards.map((postcard) => {
+    const cityKey = normalizeCityName(postcard.city);
+    const countryKey = normalizeCountryName(postcard.countryName);
+    const aiStamp =
+      postcard.aiStamp ||
+      stampByExactKey.get(`${cityKey}::${countryKey}`) ||
+      stampByCityOnly.get(cityKey) ||
+      null;
+
+    return {
+      ...postcard,
+      countryName: postcard.countryName || countryKey || '',
+      aiStamp,
+    };
+  });
+}
+
+module.exports = {
+  enrichPostcardsWithAiStamps,
+  getOrCreateCityAiStamp,
+  normalizeCityName,
+  normalizeCountryName,
+};
+===== src/services/geminiService.js
+const { GoogleGenerativeAI } = require('@google/generative-ai');
+ 
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const DEFAULT_MODEL = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
+ 
+let generativeModel = null;
+ 
+function summarizeTravelerMemory(recentMemories) {
+  if (!recentMemories.length) {
+    return 'No prior postcard history is available yet. This is their first postcard.';
+  }
+ 
+  const patterns = recentMemories.map((memory, index) => {
+    const mood = memory.atmosphere?.currentMood || 'unknown mood';
+    const caption = memory.atmosphere?.postcardCaption || 'no saved caption';
+    const city = memory.city || 'unknown city';
+    const moments = memory.atmosphere?.travelMoments?.join(', ') || '';
+    return `${index + 1}. ${city} — mood: ${mood}; caption: "${caption}"${moments ? `; moments: ${moments}` : ''}`;
+  });
+ 
+  return patterns.join('\n');
+}
+ 
+function inferTravelPersonality(recentMemories) {
+  if (!recentMemories.length) return '';
+ 
+  const captions = recentMemories.map(m => m.atmosphere?.postcardCaption || '').filter(Boolean);
+  const moods = recentMemories.map(m => m.atmosphere?.currentMood || '').filter(Boolean);
+  const moments = recentMemories.flatMap(m => m.atmosphere?.travelMoments || []);
+ 
+  return `
+Based on their history, this traveler tends to gravitate toward:
+- Moods they've responded to: ${moods.slice(0, 5).join(', ')}
+- Types of moments they've chosen: ${moments.slice(0, 6).join(', ')}
+- Captions they've written: ${captions.slice(0, 3).map(c => `"${c}"`).join(', ')}
+ 
+Use this to personalize which moments, foods, places, and fragments you surface.
+Do not repeat the same cities or moments they've already experienced.
+  `.trim();
+}
+ 
+function cleanJsonPayload(rawText) {
+  return rawText.replace(/```json\s*/gi, '').replace(/```/g, '').trim();
+}
+ 
+function getGenerativeModel() {
+  if (!GEMINI_API_KEY) {
+    throw new Error(
+      'Missing Gemini API key. Set GEMINI_API_KEY in your .env file.'
+    );
+  }
+ 
+  if (!generativeModel) {
+    const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+    generativeModel = genAI.getGenerativeModel({
+      model: DEFAULT_MODEL,
+      generationConfig: {
+        responseMimeType: 'application/json',
+        temperature: 0.9,
+      },
+    });
+  }
+ 
+  return generativeModel;
+}
+ 
+function buildImagePromptFieldDescription(city, preferences = []) {
+  const selected = preferences.length ? preferences.join(', ') : 'none specified';
+
+  return `"imagePrompt": "string — The user selected: ${selected}.
+- If Landmarks: show a real, named, iconic landmark of ${city} that people would recognize. Name it explicitly in the prompt.
+- If Food: show a close-up of a specific local dish or street food scene from ${city}. Name the food.
+- If Quiet Moments: show an intimate, empty side street or café in ${city}.
+- If Nightlife: show a lit-up bar street or night market in ${city}.
+- If Nature: show a park, trail, or natural scene specific to ${city}.
+Pick the instruction that matches the user's selection(s). If multiple are selected, blend them into one cohesive scene.
+Film photography mood, Kodak Portra, warm tones, no text."`;
+}
+
+function buildAnchorContext(anchorLocation, city) {
+  if (!anchorLocation?.location) {
+    return '';
+  }
+
+  return `
+ANCHOR LOCATION (single place for this entire postcard — image, caption, and all copy must match this place):
+- Name: ${anchorLocation.location}
+- Address: ${anchorLocation.address || 'unknown'}
+- Type: ${anchorLocation.type || 'place'}
+- City: ${city}
+
+The first entry in localPlaces MUST be this anchor location by name.
+imagePrompt MUST describe a photograph of this exact place, not a different street or building.
+  `.trim();
+}
+
+function buildPrompt({ city, travelerId, recentMemories, preferences = [], anchorLocation = null }) {
+  const memoryContext = summarizeTravelerMemory(recentMemories);
+  const personalityContext = inferTravelPersonality(recentMemories);
+  const imagePromptField = buildImagePromptFieldDescription(city, preferences);
+  const preferenceContext = preferences.length
+    ? `The traveler selected these visual themes for this postcard: ${preferences.join(', ')}. Prioritize these in travel moments, local places, and the imagePrompt.`
+    : '';
+  const anchorContext = buildAnchorContext(anchorLocation, city);
+
+  return `
+You are a travel memory and city atmosphere assistant for PostCard Agent.
+ 
+Your purpose is not to act as a travel guide or itinerary planner.
+Your role is to help users emotionally capture a city so they can create a personal travel postcard that feels human, memorable, and emotionally connected to the place.
+ 
+The experience should feel closer to:
+- a personal travel journal
+- quiet city observations
+- fragments of memory
+- moments noticed during a trip
+ 
+rather than tourism recommendations.
+ 
+---
+CITY: "${city}"
+TRAVELER ID: "${travelerId}"
+ 
+TRAVELER MEMORY (past postcards):
+${memoryContext}
+ 
+TRAVELER PERSONALITY (inferred from history):
+${personalityContext || 'First visit — no personality inferred yet. Surface a mix of iconic and quiet local moments.'}
+
+VISUAL PREFERENCES FOR THIS POSTCARD:
+${preferenceContext || 'No specific visual preference — choose a scene that best captures the city mood.'}
+
+${anchorContext || 'Pick one specific place in the city and keep all content anchored to it.'}
+---
+ 
+Generate a postcard atmosphere for ${city} right now. Consider the current season and likely time of day.
+ 
+Follow these guidelines for each section:
+ 
+[City Atmosphere]
+Describe the atmosphere through sensory details, movement, small observations, and emotionally grounded moments.
+Focus on: lighting, weather, sounds, movement, temperature, street rhythm, human details, textures, brief interactions, passing moments.
+Avoid overly polished or cinematic writing. Instead of explaining how the place feels, focus on specific details that naturally create emotion.
+Sometimes the smallest details create the strongest memories.
+ 
+[Local Food]
+3 foods, drinks, snacks, or dining atmospheres that genuinely represent the emotional identity of ${city}.
+Focus on: warmth, smell, setting, texture, routine, emotional feeling, local lifestyle.
+Do not describe food like a restaurant review.
+ 
+[Local Places]
+3 places that capture the personality of ${city} — can be famous landmarks, subway stations, side streets, markets, parks, alleys.
+Describe through lived experience and visual feeling, not as tourist attractions.
+ 
+[Visual Elements]
+3 visual elements that strongly represent the atmosphere of ${city}.
+Focus on elements that instantly make someone feel: "I know this city."
+ 
+[Travel Moments]
+5 personally resonant travel moments for this specific traveler, based on their personality and history.
+These should NOT be generic top-10 sightseeing options.
+Each moment should be a specific scene: a place + a time + a sensory detail.
+Make them feel like something only this traveler would notice.
+ 
+[Short Fragments]
+5 short emotional sentence fragments for postcard inspiration.
+These should feel naturally human, slightly incomplete, and emotionally real.
+Avoid long paragraphs. Not every sentence needs to sound profound.
+Tone: personal, quiet, observant, slightly imperfect.
+ 
+[Postcard Caption]
+One suggested caption for the postcard.
+It should feel like a real personal memory, not AI-generated travel content.
+Short, emotionally specific, slightly imperfect.
+ 
+---
+ 
+Return strict JSON with this exact shape. Do not wrap in markdown:
+{
+  "city": "string",
+  "currentMood": "string — one evocative phrase describing the city right now",
+  "visualPalette": ["string", "string", "string"],
+  "sensoryDetails": ["string", "string", "string", "string", "string"],
+  "localFood": [
+    { "name": "string", "description": "string" },
+    { "name": "string", "description": "string" },
+    { "name": "string", "description": "string" }
+  ],
+  "localPlaces": [
+    { "name": "string", "description": "string" },
+    { "name": "string", "description": "string" },
+    { "name": "string", "description": "string" }
+  ],
+  "visualElements": ["string", "string", "string"],
+  "travelMoments": ["string", "string", "string", "string", "string"],
+  "shortFragments": ["string", "string", "string", "string", "string"],
+  "postcardCaption": "string",
+  "emotionalStyles": ["string", "string", "string"],
+  ${imagePromptField}
+}
+  `.trim();
+}
+ 
+async function generateCityAtmosphere({
+  city,
+  travelerId,
+  recentMemories,
+  preferences = [],
+  anchorLocation = null,
+}) {
+  const prompt = buildPrompt({
+    city,
+    travelerId,
+    recentMemories,
+    preferences,
+    anchorLocation,
+  });
+  const model = getGenerativeModel();
+ 
+  let result;
+ 
+  try {
+    result = await model.generateContent(prompt);
+  } catch (error) {
+    throw new Error(`Gemini API request failed: ${error.message}`);
+  }
+ 
+  const rawText = result.response.text().trim();
+ 
+  if (!rawText) {
+    throw new Error('Gemini returned an empty response.');
+  }
+ 
+  let atmosphere;
+ 
+  try {
+    atmosphere = JSON.parse(cleanJsonPayload(rawText));
+  } catch (error) {
+    throw new Error(`Failed to parse Gemini JSON response: ${error.message}`);
+  }
+ 
+  return {
+    atmosphere,
+    model: DEFAULT_MODEL,
+    prompt,
+    rawText,
+  };
+}
+
+const CAPTION_SYSTEM_PROMPT = `You are writing the handwritten caption on a personal travel postcard.
+
+Look at the image carefully. Write a caption that:
+- References something specific you can actually see in the photo 
+  (the food, the light, the object, the moment)
+- Is 1–2 sentences max
+- Can be in any language the user prefers
+
+Tone: a mix of literary and present-moment warmth.
+Not journalistic. Not a punchline. Not Instagram-motivational.
+Write like someone sitting alone at a good table, quietly noticing 
+things — the light, the time, the feeling of being exactly here.
+Let it trail off slightly. Don't resolve it too neatly.
+
+Good examples:
+- "The light came in sideways. The salmon was still warm."
+- "This meal belonged to no one else. Just me and this afternoon."
+- "Halfway through, I forgot which city I was in."
+- "The tree outside moved once. I didn't take a photo of that."
+- "The light was good today. The food was worthy of it."
+- "Ordered without thinking. Stayed longer than I planned."
+- "Something about this plate felt like it was already a memory."
+- "The afternoon was almost over. I didn't rush."
+
+Bad examples (do NOT write like this):
+- "San Jose air. Still warm, still dry, carrying eucalyptus on the breeze."
+  (ignores the image, describes the city instead)
+- "A culinary journey through California comfort food."
+  (sounds like a menu description)
+- "The vibrant flavors of San Jose."
+  (generic, soulless)
+- "Didn't mean to order the salmon. Ate every bite."
+  (punchline structure, too clever, not literary enough)
+
+Return only the caption text. No quotes, labels, or JSON.`;
+
+let captionModel = null;
+
+function getCaptionModel() {
+  if (!GEMINI_API_KEY) {
+    throw new Error(
+      'Missing Gemini API key. Set GEMINI_API_KEY in your .env file.'
+    );
+  }
+
+  if (!captionModel) {
+    const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+    captionModel = genAI.getGenerativeModel({
+      model: DEFAULT_MODEL,
+      systemInstruction: CAPTION_SYSTEM_PROMPT,
+      generationConfig: {
+        temperature: 0.9,
+        maxOutputTokens: 120,
+      },
+    });
+  }
+
+  return captionModel;
+}
+
+function preferencesToCategory(preferences = []) {
+  const labelMap = {
+    Landmarks: 'landmarks',
+    Food: 'food',
+    'Quiet Moments': 'quiet',
+    Nightlife: 'nightlife',
+    Nature: 'nature',
+  };
+
+  if (preferences.length > 0) {
+    return labelMap[preferences[0]] || String(preferences[0]).toLowerCase();
+  }
+
+  return 'general';
+}
+
+async function imageUrlToInlineData(imageUrl) {
+  const normalizedUrl = String(imageUrl || '').trim();
+
+  if (!normalizedUrl) {
+    throw new Error('Image URL is required for caption generation.');
+  }
+
+  if (normalizedUrl.startsWith('data:')) {
+    const match = normalizedUrl.match(/^data:([^;]+);base64,(.+)$/);
+
+    if (!match) {
+      throw new Error('Invalid image data URL.');
+    }
+
+    return {
+      mimeType: match[1],
+      data: match[2],
+    };
+  }
+
+  let response;
+
+  try {
+    response = await fetch(normalizedUrl);
+  } catch (error) {
+    throw new Error(`Failed to fetch image for caption: ${error.message}`);
+  }
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch image for caption: HTTP ${response.status}`);
+  }
+
+  const mimeType = response.headers.get('content-type') || 'image/png';
+  const buffer = Buffer.from(await response.arrayBuffer());
+
+  return {
+    mimeType,
+    data: buffer.toString('base64'),
+  };
+}
+
+function normalizeCaptionText(rawText) {
+  return String(rawText || '')
+    .trim()
+    .replace(/^["']|["']$/g, '')
+    .trim();
+}
+
+async function generatePostcardCaption({ city, category, imageUrl }) {
+  const normalizedCity = String(city || '').trim();
+  const normalizedCategory = String(category || 'general').trim();
+  const inlineData = await imageUrlToInlineData(imageUrl);
+  const model = getCaptionModel();
+
+  let result;
+
+  try {
+    result = await model.generateContent([
+      {
+        inlineData: {
+          mimeType: inlineData.mimeType,
+          data: inlineData.data,
+        },
+      },
+      {
+        text: `City: ${normalizedCity}. Category: ${normalizedCategory}. Write the postcard caption.`,
+      },
+    ]);
+  } catch (error) {
+    throw new Error(`Gemini API request failed: ${error.message}`);
+  }
+
+  const caption = normalizeCaptionText(result.response.text());
+
+  if (!caption) {
+    throw new Error('Gemini returned an empty caption.');
+  }
+
+  return caption;
+}
+
+const DETAIL_PANEL_CATEGORIES = new Set(['landmarks', 'food', 'nightlife', 'nature', 'quiet']);
+
+const ANCHOR_TYPE_HINTS = {
+  Landmarks: 'landmark',
+  Food: 'restaurant',
+  'Quiet Moments': 'street',
+  Nightlife: 'venue',
+  Nature: 'park',
+};
+
+async function pickAnchorLocation({
+  city,
+  preferences = [],
+  regenerate = false,
+  previousAnchorName = '',
+}) {
+  const normalizedCity = String(city || '').trim();
+  const primaryPreference = preferences[0] || 'Landmarks';
+  const typeHint = ANCHOR_TYPE_HINTS[primaryPreference] || 'landmark';
+  const normalizedPreviousAnchor = String(previousAnchorName || '').trim();
+
+  let regenerationBlock = '';
+
+  if (regenerate) {
+    regenerationBlock = `
+This is a regeneration request. Do NOT pick the same place as before.
+Pick a different location of the same type in this city.
+    `.trim();
+
+    if (normalizedPreviousAnchor) {
+      regenerationBlock += `\nPreviously used location: ${normalizedPreviousAnchor}. Do not pick this place again.`;
+    }
+  }
+
+  const prompt = `
+You choose ONE specific, real-world location in ${normalizedCity} for a travel postcard.
+The traveler preference is: ${primaryPreference}.
+Pick a place that fits this preference. The type should be "${typeHint}".
+${regenerationBlock ? `\n${regenerationBlock}\n` : ''}
+Rules:
+- Use a real place name that exists in ${normalizedCity}.
+- Include a real or plausible street address.
+- Do not pick a generic description like "downtown" — use a named place.
+
+Return strict JSON only:
+{
+  "location": "string — full place name, e.g. San Jose City Hall",
+  "address": "string — street address",
+  "type": "string — one of: landmark, restaurant, street, park, venue"
+}
+  `.trim();
+
+  const model = getGenerativeModel();
+  let result;
+
+  try {
+    result = await model.generateContent(prompt);
+  } catch (error) {
+    throw new Error(`Gemini API request failed: ${error.message}`);
+  }
+
+  const rawText = result.response.text().trim();
+
+  if (!rawText) {
+    throw new Error('Gemini returned an empty anchor location response.');
+  }
+
+  let anchor;
+
+  try {
+    anchor = JSON.parse(cleanJsonPayload(rawText));
+  } catch (error) {
+    throw new Error(`Failed to parse anchor location JSON: ${error.message}`);
+  }
+
+  const location = String(anchor.location || '').trim();
+  const address = String(anchor.address || '').trim();
+  const type = String(anchor.type || typeHint).trim().toLowerCase();
+
+  if (!location) {
+    throw new Error('Anchor location response missing location name.');
+  }
+
+  return {
+    location,
+    address: address || normalizedCity,
+    type,
+  };
+}
+
+const DETAIL_PANEL_WRITER_RULES = `
+Write like a travel writer who has actually been to the city, not a travel website.
+Avoid superlatives. Do not use the words "vibrant", "bustling", or "hidden gem".
+Use present tense. Be specific to the city named.
+Return strict JSON only. Do not wrap in markdown.
+`.trim();
+
+function buildDetailPanelAnchorBlock(anchorLocation, city, category) {
+  const place = anchorLocation.location;
+  const address = anchorLocation.address || city;
+
+  return `
+ANCHOR LOCATION — write ONLY about this exact place. Do not describe a different location.
+Place: ${place}
+Address: ${address}
+Type: ${anchorLocation.type || 'place'}
+City: ${city}
+
+Generate ${category} detail panel for: ${place}, ${city}.
+The JSON must include "location": "${place}" exactly.
+  `.trim();
+}
+
+function buildDetailPanelPrompt(city, category, anchorLocation) {
+  const cityLabel = city.trim();
+  const anchorBlock = buildDetailPanelAnchorBlock(anchorLocation, cityLabel, category);
+
+  switch (category) {
+    case 'landmarks':
+      return `
+You are writing the right-side detail panel for a travel postcard.
+
+${anchorBlock}
+
+${DETAIL_PANEL_WRITER_RULES}
+
+Content rules:
+- headline: must be exactly "${anchorLocation.location}".
+- body: exactly 2 paragraphs as strings in an array.
+  Paragraph 1: why this place was chosen — emotional and visual, not tourism copy.
+  Paragraph 2: one architectural or historical detail, concrete and grounded.
+- meta: exactly 4 items with short labels and values (e.g. built year, architectural style, cultural connection, best time to visit).
+- quote: one line — how locals would describe it, not a tourist description.
+
+Return JSON with this exact shape:
+{
+  "location": "${anchorLocation.location}",
+  "eyebrow": "Why this place",
+  "headline": "string",
+  "body": ["string", "string"],
+  "meta": [
+    { "label": "string", "value": "string" },
+    { "label": "string", "value": "string" },
+    { "label": "string", "value": "string" },
+    { "label": "string", "value": "string" }
+  ],
+  "quote": "string"
+}
+      `.trim();
+
+    case 'food':
+      return `
+You are writing the right-side detail panel for a travel postcard.
+
+${anchorBlock}
+
+${DETAIL_PANEL_WRITER_RULES}
+
+Content rules:
+- headline: a poetic 3–5 word flavor description (not a restaurant name).
+- body: exactly 2 paragraphs.
+  Paragraph 1: sensory scene — smell, sound, time of night.
+  Paragraph 2: why the colors and light in the image look the way they do.
+- atmosphere: exactly 3 items with labels "Warmth", "Crowd", "Local feel" and integer values 0–100.
+- quote: one sentence with a local tip — never a Yelp-style recommendation.
+- tags: 3–4 mood words as short strings.
+
+Return JSON with this exact shape:
+{
+  "location": "${anchorLocation.location}",
+  "eyebrow": "The taste in this image",
+  "headline": "string",
+  "body": ["string", "string"],
+  "atmosphere": [
+    { "label": "Warmth", "value": 0 },
+    { "label": "Crowd", "value": 0 },
+    { "label": "Local feel", "value": 0 }
+  ],
+  "quote": "string",
+  "tags": ["string", "string", "string"]
+}
+      `.trim();
+
+    case 'nightlife':
+      return `
+You are writing the right-side detail panel for a travel postcard.
+
+${anchorBlock}
+
+${DETAIL_PANEL_WRITER_RULES}
+
+Content rules:
+- headline: a short personality verdict on ${cityLabel} at night (under 12 words).
+- body: exactly 2 paragraphs.
+  Paragraph 1: sensory night scene.
+  Paragraph 2: what kind of city this is at night — energy, type of people, vibe.
+- timeFragments: exactly 2 items — "Before midnight" and "After 1am". Each text is 1–2 sentences, a scene not a list of bars.
+- quote: one line that captures the city's nighttime personality.
+
+Return JSON with this exact shape:
+{
+  "location": "${anchorLocation.location}",
+  "eyebrow": "City character after dark",
+  "headline": "string",
+  "body": ["string", "string"],
+  "timeFragments": [
+    { "label": "Before midnight", "text": "string" },
+    { "label": "After 1am", "text": "string" }
+  ],
+  "quote": "string"
+}
+      `.trim();
+
+    case 'nature':
+      return `
+You are writing the right-side detail panel for a travel postcard.
+
+${anchorBlock}
+
+${DETAIL_PANEL_WRITER_RULES}
+
+Content rules:
+- headline: light quality plus dominant scent or air quality, 4–6 words total.
+- body: exactly 2 paragraphs.
+  Paragraph 1: physical sensation outdoors — air, smell, geography.
+  Paragraph 2: specific light quality and what time of day it peaks.
+- meta: exactly 4 items — rain days per year, average temperature for the current month, light quality description, scent profile.
+
+Return JSON with this exact shape:
+{
+  "location": "${anchorLocation.location}",
+  "eyebrow": "How this city breathes",
+  "headline": "string",
+  "body": ["string", "string"],
+  "meta": [
+    { "label": "string", "value": "string" },
+    { "label": "string", "value": "string" },
+    { "label": "string", "value": "string" },
+    { "label": "string", "value": "string" }
+  ]
+}
+      `.trim();
+
+    case 'quiet':
+      return `
+You are writing the right-side detail panel for a travel postcard.
+
+${anchorBlock}
+
+${DETAIL_PANEL_WRITER_RULES}
+
+Content rules:
+- headline: must be exactly "The city between the city".
+- body: one short paragraph of exactly 2 sentences — emotional register only, no facts or recommendations.
+- timeFragments: exactly 3 items with labels for morning, afternoon, and dusk (or equivalent). Each text is 2–3 sentences: Murakami-style, specific and sensory, no recommendations.
+- quote: one closing line, philosophical, not descriptive.
+
+Return JSON with this exact shape:
+{
+  "location": "${anchorLocation.location}",
+  "eyebrow": "Small moments",
+  "headline": "The city between the city",
+  "body": "string",
+  "timeFragments": [
+    { "label": "string", "text": "string" },
+    { "label": "string", "text": "string" },
+    { "label": "string", "text": "string" }
+  ],
+  "quote": "string"
+}
+      `.trim();
+
+    default:
+      throw new Error(`Unsupported detail panel category: ${category}`);
+  }
+}
+
+async function generatePostcardDetailPanel({ city, category, anchorLocation }) {
+  const normalizedCity = String(city || '').trim();
+  const normalizedCategory = String(category || '').trim().toLowerCase();
+
+  if (!normalizedCity) {
+    throw new Error('City is required for detail panel generation.');
+  }
+
+  if (!DETAIL_PANEL_CATEGORIES.has(normalizedCategory)) {
+    throw new Error('Invalid detail panel category.');
+  }
+
+  if (!anchorLocation?.location) {
+    throw new Error('Anchor location is required for detail panel generation.');
+  }
+
+  const prompt = buildDetailPanelPrompt(normalizedCity, normalizedCategory, anchorLocation);
+  const model = getGenerativeModel();
+
+  let result;
+
+  try {
+    result = await model.generateContent(prompt);
+  } catch (error) {
+    throw new Error(`Gemini API request failed: ${error.message}`);
+  }
+
+  const rawText = result.response.text().trim();
+
+  if (!rawText) {
+    throw new Error('Gemini returned an empty response.');
+  }
+
+  let content;
+
+  try {
+    content = JSON.parse(cleanJsonPayload(rawText));
+  } catch (error) {
+    throw new Error(`Failed to parse Gemini detail panel JSON: ${error.message}`);
+  }
+
+  content.location = anchorLocation.location;
+
+  return {
+    category: normalizedCategory,
+    city: normalizedCity,
+    anchorLocation,
+    content,
+  };
+}
+
+async function generateCityAiStamp(city, country = '') {
+  const normalizedCity = String(city || '').trim();
+  const normalizedCountry = String(country || '').trim() || 'Unknown';
+
+  if (!normalizedCity) {
+    throw new Error('City is required for AI stamp generation.');
+  }
+
+  const prompt = `
+You are designing a vintage passport city stamp identity for ${normalizedCity}, ${normalizedCountry}.
+The stamp represents the whole city identity, not any single postcard, trip, or neighborhood.
+
+Return strict JSON only:
+{
+  "city": "${normalizedCity}",
+  "country": "${normalizedCountry}",
+  "landmark": "string — the city's most iconic building or landmark in English",
+  "nature": "string — the city's most representative natural element in English",
+  "food": "string — the city's most representative food or cultural flavor element in English",
+  "colorPalette": "string — 3-5 color words, e.g. warm amber, muted red, deep brown",
+  "stampStyle": "vintage city passport stamp"
+}
+
+Rules:
+- All values must be in English.
+- landmark, nature, and food must be specific to ${normalizedCity}, not generic travel copy.
+- Do not mention a single restaurant, hotel, or current event.
+  `.trim();
+
+  const model = getGenerativeModel();
+  let result;
+
+  try {
+    result = await model.generateContent(prompt);
+  } catch (error) {
+    throw new Error(`Gemini API request failed: ${error.message}`);
+  }
+
+  const rawText = result.response.text().trim();
+
+  if (!rawText) {
+    throw new Error('Gemini returned an empty AI stamp response.');
+  }
+
+  let stamp;
+
+  try {
+    stamp = JSON.parse(cleanJsonPayload(rawText));
+  } catch (error) {
+    throw new Error(`Failed to parse AI stamp JSON: ${error.message}`);
+  }
+
+  return {
+    city: String(stamp.city || normalizedCity).trim(),
+    country: String(stamp.country || normalizedCountry).trim(),
+    landmark: String(stamp.landmark || '').trim(),
+    nature: String(stamp.nature || '').trim(),
+    food: String(stamp.food || '').trim(),
+    colorPalette: String(stamp.colorPalette || 'warm amber, muted red, deep brown').trim(),
+    stampStyle: String(stamp.stampStyle || 'vintage city passport stamp').trim(),
+  };
+}
+
+module.exports = {
+  generateCityAiStamp,
+  generateCityAtmosphere,
+  generatePostcardCaption,
+  generatePostcardDetailPanel,
+  pickAnchorLocation,
+  preferencesToCategory,
+  DETAIL_PANEL_CATEGORIES,
+};===== src/services/imageService.js
+const { PredictionServiceClient } = require('@google-cloud/aiplatform').v1;
+
+const PROJECT_ID = process.env.VERTEX_PROJECT_ID;
+const LOCATION = 'us-central1';
+const MODEL = 'imagen-3.0-generate-002';
+
+const client = new PredictionServiceClient({
+  apiEndpoint: `${LOCATION}-aiplatform.googleapis.com`,
+});
+
+function buildImagePrompt(atmosphere, city, preferences = [], anchorLocation = null) {
+  const anchor = anchorLocation || atmosphere?.anchorLocation;
+  const style =
+    'shot on Kodak Portra 400, film grain, polaroid white border, warm nostalgic atmosphere, no text, no watermark';
+
+  if (anchor?.location) {
+    const place = anchor.location;
+    const type = anchor.type || 'landmark';
+
+    // User preferences take priority over anchor type
+    const primary = preferences[0];
+
+    if (primary === 'Food' || type === 'restaurant' || type === 'food') {
+      return `A postcard-style close-up photograph of food at ${place} in ${city}, warm lighting, intimate setting, steam or texture visible, cinematic, ${style}`;
+    }
+    if (primary === 'Nightlife' || type === 'venue') {
+      return `A postcard-style nighttime photograph of ${place} in ${city}, neon signs, bar lights, wet pavement reflections, cinematic, ${style}`;
+    }
+    if (primary === 'Nature' || type === 'park') {
+      return `A postcard-style photograph of ${place} in ${city}, park or trail, dappled sunlight through trees, quiet and green, cinematic, ${style}`;
+    }
+    if (primary === 'Quiet Moments' || type === 'street') {
+      return `A postcard-style photograph of ${place} in ${city}, quiet side street or empty café, soft afternoon light, no crowds, intimate and still, cinematic, ${style}`;
+    }
+    if (primary === 'Landmarks' || type === 'landmark') {
+      return `A postcard-style photograph of ${place} at golden hour, warm light on recognizable architecture, civic foreground, cinematic, ${style}`;
+    }
+
+    return `A postcard-style photograph of ${place} in ${city}, cinematic composition, ${style}`;
+  }
+
+  // No anchor — fall back to preference-based generic prompts
+  if (preferences.includes('Food')) {
+    const food = atmosphere.localFood?.[0]?.name || 'local street food';
+    return `A close-up film photograph of ${food} in ${city}. The dish is on a table or held in hands, warm lighting, intimate setting, steam or texture visible. ${style}`;
+  }
+  if (preferences.includes('Landmarks')) {
+    const place = atmosphere.localPlaces?.[0]?.name || `a famous landmark in ${city}`;
+    return `A cinematic film photograph of ${place} in ${city}. Wide shot, golden hour light, recognizable architecture. ${style}`;
+  }
+  if (preferences.includes('Nightlife')) {
+    return `A nighttime street scene in ${city}, neon signs, bar lights, people walking, wet pavement reflections. ${style}`;
+  }
+  if (preferences.includes('Nature')) {
+    return `A nature scene in ${city}, park or trail, dappled sunlight through trees, quiet and green. ${style}`;
+  }
+  if (preferences.includes('Quiet Moments')) {
+    return `A quiet side street or empty café in ${city}, soft afternoon light, no crowds, intimate and still. ${style}`;
+  }
+
+  return `${atmosphere.imagePrompt || `A cinematic scene of ${city}`}, ${style}`;
+}
+
+async function generatePostcardImage(atmosphere, city, anchorLocation = null) {
+  if (!PROJECT_ID) {
+    throw new Error('Missing VERTEX_PROJECT_ID in .env file.');
+  }
+
+  const endpoint = `projects/${PROJECT_ID}/locations/${LOCATION}/publishers/google/models/${MODEL}`;
+  const preferences = atmosphere.preferences || [];
+  const anchor = anchorLocation || atmosphere?.anchorLocation || null;
+
+  const prompt = buildImagePrompt(atmosphere, city, preferences, anchor);
+
+  const instance = {
+    structValue: {
+      fields: {
+        prompt: { stringValue: prompt },
+      },
+    },
+  };
+
+  const parameters = {
+    structValue: {
+      fields: {
+        sampleCount: { numberValue: 1 },
+        aspectRatio: { stringValue: '4:3' },
+        safetyFilterLevel: { stringValue: 'block_some' },
+        personGeneration: { stringValue: 'allow_adult' },
+      },
+    },
+  };
+
+  let response;
+
+  try {
+    [response] = await client.predict({
+      endpoint,
+      instances: [instance],
+      parameters,
+    });
+  } catch (error) {
+    throw new Error(`Imagen API request failed: ${error.message}`);
+  }
+
+  const predictions = response.predictions;
+
+  if (!predictions || predictions.length === 0) {
+    throw new Error('Imagen returned no predictions.');
+  }
+
+  const imageBase64 =
+    predictions[0].structValue?.fields?.bytesBase64Encoded?.stringValue;
+
+  if (!imageBase64) {
+    throw new Error('Imagen returned no image data.');
+  }
+
+  return {
+    imageBase64,
+    mimeType: 'image/png',
+    prompt,
+  };
+}
+
+module.exports = {
+  generatePostcardImage,
+};
+===== src/services/mailService.js
+const { Resend } = require('resend');
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function normalizeBase64(raw) {
+  if (typeof raw !== 'string' || !raw.trim()) return '';
+  const trimmed = raw.trim();
+  if (trimmed.includes(',')) return trimmed.split(',')[1].trim();
+  return trimmed;
+}
+
+function isSmtpConfigured() {
+  return Boolean(process.env.RESEND_API_KEY);
+}
+
+async function sendPostcardEmail({ recipientEmail, postcardImageBase64, caption, city }) {
+  if (!isSmtpConfigured()) {
+    throw new Error('Email is not configured. Set RESEND_API_KEY in your environment.');
+  }
+
+  const base64 = normalizeBase64(postcardImageBase64);
+  if (!base64) throw new Error('A postcard image is required to send email.');
+
+  const safeCity = escapeHtml(city || 'Your postcard');
+  const captionHtml = caption?.trim()
+    ? `<p style="margin:0 0 16px;font-size:16px;line-height:1.5;color:#2c2017;">${escapeHtml(caption.trim())}</p>`
+    : '<p style="margin:0 0 16px;font-size:15px;color:#6b5b4f;font-style:italic;">No caption — silence says more.</p>';
+
+  const html = `
+<!DOCTYPE html>
+<html>
+  <body style="margin:0;padding:24px;background:#f4efe6;font-family:Georgia,serif;">
+    <p style="margin:0 0 8px;font-size:13px;color:#8a7a6a;">PostCard Agent</p>
+    <h1 style="margin:0 0 20px;font-size:22px;color:#2c2017;">A postcard from ${safeCity}</h1>
+    ${captionHtml}
+    <img src="data:image/png;base64,${base64}" alt="Postcard" width="640" style="max-width:100%;height:auto;border-radius:8px;box-shadow:0 12px 40px rgba(0,0,0,0.15);" />
+  </body>
+</html>`.trim();
+
+  const resend = new Resend(process.env.RESEND_API_KEY);
+
+  await resend.emails.send({
+    from: 'PostCard Agent <onboarding@resend.dev>',
+    to: recipientEmail.trim(),
+    subject: `Postcard from ${city || 'PostCard Agent'}`,
+    html,
+  });
+}
+
+module.exports = {
+  sendPostcardEmail,
+  isSmtpConfigured,
+};===== src/utils/userId.js
+function getUserId(req) {
+  const headerId = req.headers['x-user-id'];
+
+  return (
+    (typeof headerId === 'string' ? headerId.trim() : '') ||
+    req.body?.userId?.trim() ||
+    req.body?.travelerId?.trim() ||
+    req.query?.userId?.trim() ||
+    req.query?.travelerId?.trim() ||
+    'demo-user'
+  );
+}
+
+function buildUserIdQuery(userId) {
+  return {
+    $or: [{ userId }, { travelerId: userId }],
+  };
+}
+
+module.exports = {
+  buildUserIdQuery,
+  getUserId,
+};
+===== client/src/App.jsx
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import html2canvas from 'html2canvas';
+import AiCityStamp from './components/AiCityStamp';
+import PostcardDetailPanel, { preferenceToCategory } from './components/PostcardDetailPanel';
+import {
+  countPostcardsForCity,
+  findCityGroupForPostcard,
+  formatMonthYear,
+  getCountryFlag,
+  groupPostcardsByCountryAndCity,
+  resolveCanonicalCityName,
+} from './utils/collection';
+import './App.css';
+
+const USER_ID_STORAGE_KEY = 'postcard-agent:user-id';
+const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000').replace(
+  /\/$/,
+  ''
+);
+
+function getOrCreateUserId() {
+  try {
+    let userId = localStorage.getItem(USER_ID_STORAGE_KEY);
+
+    if (!userId) {
+      userId = crypto.randomUUID();
+      localStorage.setItem(USER_ID_STORAGE_KEY, userId);
+    }
+
+    return userId;
+  } catch {
+    return 'demo-user';
+  }
+}
+const COLOR_LEXICON = [
+  { keywords: ['amber', 'lantern', 'warm', 'gold'], color: '#d59657' },
+  { keywords: ['rain', 'wet', 'drizzle', 'storm'], color: '#50657b' },
+  { keywords: ['pink', 'blossom', 'spring', 'rose'], color: '#c790a3' },
+  { keywords: ['night', 'midnight', 'shadow', 'dark'], color: '#1b2239' },
+  { keywords: ['neon', 'jazz', 'violet', 'electric'], color: '#6e5dd4' },
+  { keywords: ['steam', 'paper', 'matte', 'fog'], color: '#f0dcc2' },
+  { keywords: ['green', 'temple', 'moss', 'forest'], color: '#4d6b5f' },
+  { keywords: ['red', 'lanterns', 'crimson'], color: '#9f4c42' },
+];
+const FALLBACK_COLORS = ['#1d2334', '#4b536b', '#91664d', '#ecd2b2'];
+
+const PREFERENCE_OPTIONS = [
+  { id: 'landmarks', label: 'Landmarks' },
+  { id: 'food', label: 'Food' },
+  { id: 'quiet', label: 'Quiet Moments' },
+  { id: 'nightlife', label: 'Nightlife' },
+  { id: 'nature', label: 'Nature' },
+];
+
+const STEP_TRANSITION_MS = 320;
+const CAPTION_MAX_LENGTH = 120;
+
+function getPreferenceLabels(preferenceIds) {
+  return preferenceIds
+    .map((id) => PREFERENCE_OPTIONS.find((option) => option.id === id)?.label)
+    .filter(Boolean);
+}
+
+function getPostcardId(postcard) {
+  return postcard?.id || postcard?._id || '';
+}
+
+function normalizeCityName(city) {
+  const trimmed = String(city || '').trim();
+
+  if (!trimmed) {
+    return '';
+  }
+
+  return trimmed
+    .toLowerCase()
+    .split(/\s+/)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ');
+}
+
+function HeartIcon({ filled }) {
+  return (
+    <svg
+      className={`card-action-icon${filled ? ' card-action-icon--filled' : ''}`}
+      viewBox="0 0 24 24"
+      width="16"
+      height="16"
+      aria-hidden="true"
+    >
+      <path
+        d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"
+        fill={filled ? 'currentColor' : 'none'}
+        stroke="currentColor"
+        strokeWidth="1.5"
+      />
+    </svg>
+  );
+}
+
+function TrashIcon() {
+  return (
+    <svg className="card-action-icon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+      <path
+        d="M9 3h6l1 2h4v2H4V5h4l1-2zm1 6h2v9h-2V9zm4 0h2v9h-2V9zM7 9h2v9H7V9z"
+        fill="currentColor"
+      />
+    </svg>
+  );
+}
+
+function HistoryCityCard({ cityGroup, onSelect }) {
+  return (
+    <button type="button" className="history-city-card" onClick={() => onSelect(cityGroup)}>
+      <AiCityStamp
+        aiStamp={cityGroup.aiStamp}
+        cityName={cityGroup.cityName}
+        category={cityGroup.category}
+        size="sm"
+      />
+      <div className="history-city-card__body">
+        <span className="history-city-card__name">{cityGroup.cityName}</span>
+        <span className="history-city-card__meta">
+          {cityGroup.postcardCount} postcard{cityGroup.postcardCount === 1 ? '' : 's'}
+        </span>
+        <span className="history-city-card__meta">
+          Latest {formatMonthYear(cityGroup.latestAt)}
+        </span>
+      </div>
+    </button>
+  );
+}
+
+function HistoryPostcardCard({
+  postcard,
+  pendingDeleteId,
+  onSelect,
+  onToggleFavorite,
+  onConfirmDelete,
+  onDelete,
+  onCancelDelete,
+}) {
+  const postcardId = getPostcardId(postcard);
+  const thumbSrc = getPostcardImageSrc(postcard);
+  const caption = readCaptionOverride(postcardId) ?? postcard.caption ?? '';
+  const isFavorited = Boolean(postcard.isFavorited);
+  const isConfirmingDelete = pendingDeleteId === postcardId;
+
+  return (
+    <div className="history-card">
+      <div className="card-actions">
+        <button
+          type="button"
+          className="card-action-button"
+          aria-label={isFavorited ? 'Unfavorite postcard' : 'Favorite postcard'}
+          onClick={(event) => {
+            event.stopPropagation();
+            onToggleFavorite(postcard);
+          }}
+        >
+          <HeartIcon filled={isFavorited} />
+        </button>
+        <button
+          type="button"
+          className="card-action-button"
+          aria-label="Delete postcard"
+          onClick={(event) => {
+            event.stopPropagation();
+            onConfirmDelete(postcardId);
+          }}
+        >
+          <TrashIcon />
+        </button>
+      </div>
+
+      {isConfirmingDelete ? (
+        <div className="history-card__confirm">
+          <p className="history-card__confirm-text">Remove this postcard?</p>
+          <div className="history-card__confirm-actions">
+            <button
+              type="button"
+              className="button button--ghost history-card__confirm-button"
+              onClick={() => onDelete(postcardId)}
+            >
+              Yes
+            </button>
+            <button
+              type="button"
+              className="button button--ghost history-card__confirm-button"
+              onClick={onCancelDelete}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button type="button" className="history-card__select" onClick={() => onSelect(postcard)}>
+          {thumbSrc ? (
+            <img className="history-card__thumb" src={thumbSrc} alt="" />
+          ) : (
+            <span className="history-card__thumb history-card__thumb--empty" />
+          )}
+          <span className="history-card__body">
+            <span className="history-card__date">{formatDate(postcard.createdAt)}</span>
+            {caption ? <span className="history-card__caption">{caption}</span> : null}
+          </span>
+        </button>
+      )}
+    </div>
+  );
+}
+
+function PostcardOverlay({ onClose, children }) {
+  useEffect(() => {
+    function handleKeyDown(event) {
+      if (event.key === 'Escape') {
+        onClose();
+      }
+    }
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    window.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [onClose]);
+
+  return (
+    <div className="postcard-overlay" role="dialog" aria-modal="true" aria-label="Postcard detail">
+      <button
+        type="button"
+        className="postcard-overlay__close"
+        aria-label="Close postcard"
+        onClick={onClose}
+      >
+        ×
+      </button>
+      <div className="postcard-overlay__inner guided-step__inner guided-postcard-layout">{children}</div>
+    </div>
+  );
+}
+
+function PostcardFlipCard({
+  captureRef,
+  cardCaptureRef,
+  visualStyle,
+  imageSrc,
+  displayCaption,
+  showCaptionOverlay,
+  autoCaptionLoading,
+  captionMode,
+  cityName,
+  collectedNumber,
+  createdAt,
+  isFlipped,
+  onToggleFlip,
+}) {
+  const backMessage =
+    showCaptionOverlay
+      ? displayCaption
+      : captionMode === 'auto' && autoCaptionLoading
+        ? 'Composing a line...'
+        : '';
+
+  return (
+    <button
+      ref={cardCaptureRef}
+      type="button"
+      className={`postcard-flip-scene${isFlipped ? ' postcard-flip-scene--flipped' : ''}`}
+      onClick={onToggleFlip}
+      aria-label={isFlipped ? 'Show postcard front' : 'Show postcard back'}
+    >
+      <div className="postcard-flip-card">
+        <div
+          ref={captureRef}
+          className="postcard-flip-face postcard-flip-face--front postcard-photo"
+          style={visualStyle}
+        >
+          {imageSrc ? (
+            <img className="postcard-photo__image" src={imageSrc} alt="" decoding="sync" />
+          ) : null}
+        </div>
+
+        <div className="postcard-flip-face postcard-flip-face--back">
+          <div className="postcard-back postcard-back--paper">
+            <div className="postcard-back__content postcard-back__content--simple">
+              <div className="postcard-back__meta-block">
+                <span className="postcard-back__meta-label">Collected No.</span>
+                <span className="postcard-back__meta-value">
+                  {collectedNumber ? String(collectedNumber).padStart(3, '0') : '001'}
+                </span>
+              </div>
+              <div className="postcard-back__meta-block">
+                <span className="postcard-back__meta-label">City</span>
+                <span className="postcard-back__meta-value">{cityName || 'Unknown'}</span>
+              </div>
+              <div className="postcard-back__meta-block">
+                <span className="postcard-back__meta-label">Date</span>
+                <span className="postcard-back__meta-value">{formatShortDate(createdAt)}</span>
+              </div>
+              {backMessage ? (
+                <p className="postcard-back__caption" aria-live="polite">
+                  {backMessage}
+                </p>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      </div>
+    </button>
+  );
+}
+
+function PostcardDetailLayout({
+  postcard,
+  captureRef,
+  visualStyle,
+  imageSrc,
+  displayCaption,
+  showCaptionOverlay,
+  autoCaptionLoading,
+  captionMode,
+  autoCaptionError,
+  sendEmailExpanded,
+  onToggleSendEmail,
+  onDownloadPostcard,
+  downloadLoading,
+  recipientEmail,
+  onRecipientEmailChange,
+  onSendEmail,
+  sendEmailStatus,
+  sendEmailMessage,
+  showCreationActions,
+  onChangeVibe,
+  onSameVibeNewSpot,
+  onViewHistory,
+  isGenerating,
+  detailCategory,
+  collectedNumber,
+}) {
+  const [isFlipped, setIsFlipped] = useState(false);
+  const cardCaptureRef = useRef(null);
+  const postcardId = getPostcardId(postcard);
+
+  useEffect(() => {
+    setIsFlipped(false);
+  }, [postcardId]);
+
+  return (
+    <div className="guided-postcard-stack">
+      <div className="guided-postcard-frame">
+        <PostcardFlipCard
+          captureRef={captureRef}
+          cardCaptureRef={cardCaptureRef}
+          visualStyle={visualStyle}
+          imageSrc={imageSrc}
+          displayCaption={displayCaption}
+          showCaptionOverlay={showCaptionOverlay}
+          autoCaptionLoading={autoCaptionLoading}
+          captionMode={captionMode}
+          cityName={postcard.city}
+          collectedNumber={collectedNumber}
+          createdAt={postcard.createdAt}
+          isFlipped={isFlipped}
+          onToggleFlip={() => setIsFlipped((flipped) => !flipped)}
+        />
+        {isGenerating ? (
+          <div
+            className="guided-postcard-frame__loading"
+            aria-live="polite"
+            aria-busy="true"
+          >
+            <p className="guided-postcard-frame__loading-text guided-loading guided-loading--pulse">
+              Finding a new spot...
+            </p>
+          </div>
+        ) : null}
+      </div>
+
+      {autoCaptionError ? <p className="callout callout--error">{autoCaptionError}</p> : null}
+
+      <div className="guided-postcard-mood">
+        {detailCategory && postcard.atmosphere?.anchorLocation ? (
+          <PostcardDetailPanel
+            layout="postcard"
+            category={detailCategory}
+            city={postcard.city}
+            anchorLocation={postcard.atmosphere.anchorLocation}
+          />
+        ) : null}
+      </div>
+
+      <footer className="guided-postcard-footer">
+        <div className="guided-actions guided-actions--postcard">
+          <button
+            type="button"
+            className="button button--ghost button--icon"
+            aria-label="Download postcard"
+            disabled={downloadLoading}
+            onClick={() => onDownloadPostcard(cardCaptureRef.current, isFlipped)}
+          >
+            ↓
+          </button>
+          <button
+            type="button"
+            className="button button--ghost button--icon"
+            aria-label="Send via email"
+            aria-expanded={sendEmailExpanded}
+            onClick={onToggleSendEmail}
+          >
+            ✉
+          </button>
+          {showCreationActions ? (
+            <>
+              <button
+                type="button"
+                className="button button--ghost"
+                onClick={onChangeVibe}
+                disabled={isGenerating}
+              >
+                Change Vibe
+              </button>
+              <button
+                type="button"
+                className="button button--ghost"
+                onClick={onSameVibeNewSpot}
+                disabled={isGenerating}
+              >
+                Same Vibe, New Spot
+              </button>
+              <button type="button" className="button button--ghost" onClick={onViewHistory}>
+                View History
+              </button>
+            </>
+          ) : null}
+        </div>
+
+        {sendEmailExpanded ? (
+          <form className="email-send-panel" onSubmit={onSendEmail}>
+            <label className="email-send-field">
+              <span>Recipient email</span>
+              <input
+                type="email"
+                value={recipientEmail}
+                onChange={(event) => onRecipientEmailChange(event.target.value)}
+                placeholder="you@example.com"
+                autoComplete="email"
+              />
+            </label>
+            <button
+              className="button button--primary email-send-submit"
+              type="submit"
+              disabled={sendEmailStatus === 'sending'}
+            >
+              {sendEmailStatus === 'sending' ? 'Sending...' : 'Send'}
+            </button>
+            {sendEmailMessage ? (
+              <p
+                className={`callout ${
+                  sendEmailStatus === 'error' ? 'callout--error' : 'callout--success'
+                }`}
+              >
+                {sendEmailMessage}
+              </p>
+            ) : null}
+          </form>
+        ) : null}
+      </footer>
+    </div>
+  );
+}
+
+async function requestJson(path, options = {}) {
+  const userId = getOrCreateUserId();
+  const response = await fetch(`${API_BASE}${path}`, {
+    ...options,
+    headers: {
+      'x-user-id': userId,
+      ...(options.headers || {}),
+    },
+  });
+  const isJson = response.headers.get('content-type')?.includes('application/json');
+  const payload = isJson ? await response.json() : null;
+
+  if (!response.ok || !payload?.success) {
+    throw new Error(payload?.error || 'The postcard service is unavailable right now.');
+  }
+
+  return payload.data;
+}
+
+function getCurrentPositionAsync(options) {
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) {
+      reject(new Error('NO_GEO'));
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(resolve, reject, options);
+  });
+}
+
+function isAsciiOnlyText(value) {
+  const text = String(value || '').trim();
+
+  return text.length > 0 && /^[\x20-\x7E]+$/.test(text);
+}
+
+function pickAsciiAddressField(...candidates) {
+  for (const candidate of candidates) {
+    const text = String(candidate || '').trim();
+
+    if (text && isAsciiOnlyText(text)) {
+      return text;
+    }
+  }
+
+  return '';
+}
+
+function readLocationFromNominatimPayload(data) {
+  const address = data?.address || {};
+
+  const city = pickAsciiAddressField(
+    address.city,
+    address.town,
+    address.state,
+    address.country
+  );
+  const country = pickAsciiAddressField(address.country);
+  const pillCity = pickAsciiAddressField(address.city);
+  const label = pillCity && country ? `${pillCity}, ${country}` : [pillCity, country].filter(Boolean).join(', ');
+
+  return { city, country, label };
+}
+
+function readLocationFromGeocodeResult(data) {
+  if (data?.address) {
+    return readLocationFromNominatimPayload(data);
+  }
+
+  const city = pickAsciiAddressField(data?.city, data?.state, data?.country);
+  const country = pickAsciiAddressField(data?.country);
+  const label = [city, country].filter(Boolean).join(', ');
+
+  return { city, country, label };
+}
+
+async function fetchLocationFromCoordinates(lat, lon) {
+  try {
+    const nominatim = new URL('https://nominatim.openstreetmap.org/reverse');
+    nominatim.searchParams.set('lat', String(lat));
+    nominatim.searchParams.set('lon', String(lon));
+    nominatim.searchParams.set('format', 'json');
+    nominatim.searchParams.set('accept-language', 'en');
+    const url = nominatim.toString();
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'PostCardAgent/1.0',
+        'Accept-Language': 'en',
+      },
+    });
+
+    if (response.ok) {
+      const data = await response.json();
+      const location = readLocationFromNominatimPayload(data);
+
+      if (location.city) {
+        return location;
+      }
+    }
+  } catch {
+    // Nominatim may block browser cross-origin requests; fall back to the API proxy.
+  }
+
+  const payload = await requestJson(
+    `/api/geolocation/reverse?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`
+  );
+
+  return readLocationFromGeocodeResult(payload);
+}
+
+const LOCATION_UNAVAILABLE_MESSAGE = 'Location unavailable — please type your city';
+
+function buildShareUrl(postcardId) {
+  const url = new URL(window.location.href);
+
+  if (postcardId) {
+    url.searchParams.set('postcard', postcardId);
+  } else {
+    url.searchParams.delete('postcard');
+  }
+
+  return url.toString();
+}
+
+function syncShareUrl(postcardId) {
+  window.history.replaceState({}, '', buildShareUrl(postcardId));
+}
+
+function readCaptionOverride(postcardId) {
+  if (!postcardId) {
+    return null;
+  }
+
+  try {
+    return window.localStorage.getItem(`postcard-caption:${postcardId}`);
+  } catch {
+    return null;
+  }
+}
+
+function writeCaptionOverride(postcardId, caption) {
+  if (!postcardId) {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(`postcard-caption:${postcardId}`, caption);
+  } catch {
+    // Ignore storage errors in private browsing or restricted contexts.
+  }
+}
+
+const LAST_POSTCARD_ID_KEY = 'postcard-agent:last-postcard-id';
+
+function readLastPostcardId() {
+  try {
+    return window.localStorage.getItem(LAST_POSTCARD_ID_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function writeLastPostcardId(postcardId) {
+  if (!postcardId) {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(LAST_POSTCARD_ID_KEY, postcardId);
+  } catch {
+    // Ignore storage errors in private browsing or restricted contexts.
+  }
+}
+
+function clearLastPostcardId() {
+  try {
+    window.localStorage.removeItem(LAST_POSTCARD_ID_KEY);
+  } catch {
+    // Ignore storage errors in private browsing or restricted contexts.
+  }
+}
+
+const POSTCARD_CAPTURE_STYLE_ID = 'postcard-html2canvas-capture';
+
+function preparePostcardCloneForCapture(clonedDoc) {
+  const photo = clonedDoc.querySelector('.postcard-photo');
+
+  if (photo) {
+    photo.style.boxShadow = 'none';
+    photo.style.filter = 'none';
+    photo.style.mixBlendMode = 'normal';
+    photo.style.isolation = 'auto';
+    photo.style.opacity = '1';
+
+    const img = photo.querySelector('.postcard-photo__image');
+
+    if (img) {
+      img.style.filter = 'none';
+      img.style.mixBlendMode = 'normal';
+      img.style.opacity = '1';
+      img.style.imageRendering = 'auto';
+    }
+  }
+
+  if (!clonedDoc.getElementById(POSTCARD_CAPTURE_STYLE_ID)) {
+    const style = clonedDoc.createElement('style');
+    style.id = POSTCARD_CAPTURE_STYLE_ID;
+    style.textContent = `
+      .postcard-photo::before,
+      .postcard-photo::after {
+        display: none !important;
+        content: none !important;
+      }
+      .postcard-photo {
+        box-shadow: none !important;
+        filter: none !important;
+        mix-blend-mode: normal !important;
+      }
+    `;
+    clonedDoc.head.appendChild(style);
+  }
+}
+
+function getPostcardImageSrc(postcard) {
+  if (!postcard?.image?.base64) {
+    return null;
+  }
+
+  const mimeType = postcard.image.mimeType || 'image/png';
+  return `data:${mimeType};base64,${postcard.image.base64}`;
+}
+
+async function waitForPostcardImageReady(container) {
+  const img = container?.querySelector('.postcard-photo__image');
+
+  if (!img) {
+    return;
+  }
+
+  if (img.complete && img.naturalWidth > 0) {
+    return;
+  }
+
+  await new Promise((resolve, reject) => {
+    img.addEventListener('load', resolve, { once: true });
+    img.addEventListener('error', () => reject(new Error('Postcard image failed to load.')), {
+      once: true,
+    });
+  });
+}
+
+function preparePostcardCardCloneForCapture(clonedDoc, clonedElement, isFlipped) {
+  preparePostcardCloneForCapture(clonedDoc);
+
+  const scene =
+    clonedElement?.classList?.contains('postcard-flip-scene')
+      ? clonedElement
+      : clonedDoc.querySelector('.postcard-flip-scene');
+
+  if (!scene) {
+    return;
+  }
+
+  scene.style.cursor = 'default';
+  scene.style.transform = 'none';
+
+  const card = scene.querySelector('.postcard-flip-card');
+  const front = scene.querySelector('.postcard-flip-face--front');
+  const back = scene.querySelector('.postcard-flip-face--back');
+
+  if (card) {
+    card.style.transform = 'none';
+    card.style.transformStyle = 'flat';
+  }
+
+  if (isFlipped) {
+    if (front) {
+      front.style.display = 'none';
+    }
+
+    if (back) {
+      back.style.transform = 'none';
+      back.style.position = 'relative';
+      back.style.inset = 'auto';
+      back.style.width = '100%';
+      back.style.height = '100%';
+    }
+  } else if (back) {
+    back.style.display = 'none';
+
+    if (front) {
+      front.style.transform = 'none';
+      front.style.position = 'relative';
+      front.style.inset = 'auto';
+      front.style.width = '100%';
+      front.style.height = '100%';
+    }
+  }
+
+  if (!clonedDoc.getElementById(`${POSTCARD_CAPTURE_STYLE_ID}-card`)) {
+    const style = clonedDoc.createElement('style');
+    style.id = `${POSTCARD_CAPTURE_STYLE_ID}-card`;
+    style.textContent = `
+      .postcard-flip-scene,
+      .postcard-flip-card,
+      .postcard-flip-face {
+        transform: none !important;
+        transform-style: flat !important;
+        perspective: none !important;
+      }
+      .postcard-back__image {
+        filter: blur(8px) brightness(0.35) !important;
+      }
+      .postcard-back--paper {
+        background: #efe4d0 !important;
+      }
+    `;
+    clonedDoc.head.appendChild(style);
+  }
+}
+
+async function waitForPostcardCardReady(container) {
+  const images = container?.querySelectorAll('img') || [];
+
+  await Promise.all(
+    [...images].map(
+      (img) =>
+        new Promise((resolve, reject) => {
+          if (img.complete && img.naturalWidth > 0) {
+            resolve();
+            return;
+          }
+
+          img.addEventListener('load', resolve, { once: true });
+          img.addEventListener('error', () => reject(new Error('Postcard image failed to load.')), {
+            once: true,
+          });
+        })
+    )
+  );
+}
+
+function buildPostcardDownloadFilename(city) {
+  const slug =
+    String(city || 'postcard')
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '') || 'postcard';
+
+  return `postcard-${slug}-${Date.now()}.png`;
+}
+
+function downloadPostcardPng(dataUrl, filename) {
+  const link = document.createElement('a');
+  link.href = dataUrl;
+  link.download = filename;
+  link.rel = 'noopener';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+
+function capturePostcardElement(element) {
+  const scale = window.devicePixelRatio * 2;
+
+  return html2canvas(element, {
+    useCORS: true,
+    allowTaint: false,
+    backgroundColor: null,
+    scale,
+    logging: false,
+    imageTimeout: 15000,
+    onclone: (clonedDoc) => {
+      preparePostcardCloneForCapture(clonedDoc);
+    },
+  });
+}
+
+function capturePostcardCardElement(element, isFlipped = false) {
+  const scale = window.devicePixelRatio * 2;
+
+  return html2canvas(element, {
+    useCORS: true,
+    allowTaint: false,
+    backgroundColor: null,
+    scale,
+    logging: false,
+    imageTimeout: 15000,
+    onclone: (clonedDoc, clonedElement) => {
+      preparePostcardCardCloneForCapture(clonedDoc, clonedElement, isFlipped);
+    },
+  });
+}
+
+function pickVisualColors(atmosphere) {
+  const searchableText = [
+    atmosphere?.currentMood,
+    ...(atmosphere?.visualPalette || []),
+    ...(atmosphere?.sensoryDetails || []),
+    ...(atmosphere?.travelMoments || []),
+  ]
+    .join(' ')
+    .toLowerCase();
+
+  const matches = COLOR_LEXICON.filter(({ keywords }) =>
+    keywords.some((keyword) => searchableText.includes(keyword))
+  ).map(({ color }) => color);
+  const uniqueMatches = [...new Set(matches)];
+
+  return [...uniqueMatches, ...FALLBACK_COLORS].slice(0, 4);
+}
+
+function formatShortDate(value) {
+  if (!value) {
+    return 'Unknown';
+  }
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return 'Unknown';
+  }
+
+  return new Intl.DateTimeFormat('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  }).format(date);
+}
+
+function formatDate(value) {
+  if (!value) {
+    return 'Just now';
+  }
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return 'Just now';
+  }
+
+  return new Intl.DateTimeFormat('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  }).format(date);
+}
+
+function App() {
+  const [step, setStep] = useState(0);
+  const [stepVisible, setStepVisible] = useState(true);
+
+  const [city, setCity] = useState('');
+  const [countryName, setCountryName] = useState('');
+  const [geoResolvedCity, setGeoResolvedCity] = useState('');
+  const [detectedLocationLabel, setDetectedLocationLabel] = useState('');
+  const [locationLoading, setLocationLoading] = useState(false);
+  const [locationError, setLocationError] = useState('');
+
+  const [selectedPreferences, setSelectedPreferences] = useState([]);
+  const [captionMode, setCaptionMode] = useState('auto');
+  const [pendingCaption, setPendingCaption] = useState('');
+
+  const [historyItems, setHistoryItems] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [pendingDeleteId, setPendingDeleteId] = useState(null);
+  const [lastPostcardId, setLastPostcardId] = useState(() => readLastPostcardId());
+  const [selectedPostcard, setSelectedPostcard] = useState(null);
+  const [draftCaption, setDraftCaption] = useState('');
+  const [autoCaption, setAutoCaption] = useState('');
+  const [autoCaptionLoading, setAutoCaptionLoading] = useState(false);
+  const [autoCaptionError, setAutoCaptionError] = useState('');
+
+  const [sendEmailExpanded, setSendEmailExpanded] = useState(false);
+  const [recipientEmail, setRecipientEmail] = useState('');
+  const [sendEmailStatus, setSendEmailStatus] = useState('idle');
+  const [sendEmailMessage, setSendEmailMessage] = useState('');
+  const [downloadLoading, setDownloadLoading] = useState(false);
+  const [selectedHistoryCity, setSelectedHistoryCity] = useState(null);
+
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [errorMessage, setErrorMessage] = useState('');
+
+  const postcardCaptureRef = useRef(null);
+  const generationRunRef = useRef(false);
+  const deepLinkHandledRef = useRef(false);
+
+  const selectedPostcardId = getPostcardId(selectedPostcard);
+  const resolvedCity = (geoResolvedCity || city).trim();
+  const historyByCountry = useMemo(
+    () => groupPostcardsByCountryAndCity(historyItems, normalizeCityName),
+    [historyItems]
+  );
+  const favoritedPostcards = useMemo(
+    () =>
+      [...historyItems]
+        .filter((postcard) => postcard.isFavorited)
+        .sort((left, right) => new Date(right.createdAt) - new Date(left.createdAt)),
+    [historyItems]
+  );
+
+  const visualColors = useMemo(
+    () => pickVisualColors(selectedPostcard?.atmosphere),
+    [selectedPostcard]
+  );
+  const postcardVisualStyle = useMemo(
+    () => ({
+      '--photo-gradient': `linear-gradient(135deg, ${visualColors[0]} 0%, ${visualColors[1]} 30%, ${visualColors[2]} 68%, ${visualColors[3]} 100%)`,
+    }),
+    [visualColors]
+  );
+
+  const displayCaption = useMemo(() => {
+    if (!selectedPostcard) {
+      return '';
+    }
+
+    if (captionMode === 'auto') {
+      return autoCaption.trim();
+    }
+
+    return draftCaption.trim();
+  }, [captionMode, autoCaption, draftCaption, selectedPostcard]);
+
+  const showCaptionOverlay = Boolean(displayCaption);
+  const postcardImageSrc = useMemo(
+    () => getPostcardImageSrc(selectedPostcard),
+    [selectedPostcard]
+  );
+
+  const detailCategory = useMemo(
+    () =>
+      preferenceToCategory(
+        selectedPreferences,
+        selectedPostcard?.atmosphere?.preferences
+      ),
+    [selectedPreferences, selectedPostcard]
+  );
+  const selectedCityPostcardCount = useMemo(() => {
+    if (!selectedPostcard?.city) {
+      return 0;
+    }
+
+    return countPostcardsForCity(historyItems, selectedPostcard.city, normalizeCityName);
+  }, [historyItems, selectedPostcard]);
+  const selectedPostcardCategory = useMemo(() => {
+    const preference = selectedPostcard?.atmosphere?.preferences?.[0];
+
+    if (!preference) {
+      return detailCategory || 'landmarks';
+    }
+
+    const labelMap = {
+      Landmarks: 'landmarks',
+      Food: 'food',
+      'Quiet Moments': 'quiet',
+      Nightlife: 'nightlife',
+      Nature: 'nature',
+    };
+
+    return labelMap[preference] || detailCategory || 'landmarks';
+  }, [selectedPostcard, detailCategory]);
+  const selectedCollectedNumber = useMemo(() => {
+    if (!selectedPostcard?.city) {
+      return 1;
+    }
+
+    const targetCity = resolveCanonicalCityName(selectedPostcard, normalizeCityName);
+    const cityPostcards = historyItems
+      .filter(
+        (item) =>
+          resolveCanonicalCityName(item, normalizeCityName) === targetCity && !item.isFavorited
+      )
+      .sort((left, right) => new Date(left.createdAt) - new Date(right.createdAt));
+
+    const index = cityPostcards.findIndex(
+      (item) => getPostcardId(item) === getPostcardId(selectedPostcard)
+    );
+
+    return index >= 0 ? index + 1 : cityPostcards.length || 1;
+  }, [historyItems, selectedPostcard]);
+
+  const goToStep = useCallback((nextStep) => {
+    setStepVisible(false);
+    window.setTimeout(() => {
+      setStep(nextStep);
+      setStepVisible(true);
+    }, STEP_TRANSITION_MS);
+  }, []);
+
+  function applyPostcardSelection(
+    postcard,
+    { caption = null, mode = 'auto', updateShareUrl = true } = {}
+  ) {
+    const postcardId = getPostcardId(postcard);
+    const storedCaption = readCaptionOverride(postcardId);
+    const initialCaption = caption ?? storedCaption ?? '';
+
+    setSelectedPostcard(postcard);
+    setCaptionMode(mode);
+    setDraftCaption(mode === 'write' ? initialCaption : '');
+    setAutoCaption(mode === 'auto' ? (postcard?.caption ?? '') : '');
+    setAutoCaptionError('');
+
+    if (updateShareUrl) {
+      syncShareUrl(postcardId);
+    }
+  }
+
+  function closeHistoryOverlay() {
+    setSelectedPostcard(null);
+  }
+
+  function navigateToHistory() {
+    closeHistoryOverlay();
+    goToStep(6);
+  }
+
+  function navigateToHome() {
+    closeHistoryOverlay();
+    setErrorMessage('');
+    goToStep(1);
+  }
+
+  async function navigateToPostcard(targetId) {
+    closeHistoryOverlay();
+    setErrorMessage('');
+
+    if (!targetId) {
+      goToStep(5);
+      return;
+    }
+
+    const fromHistory = historyItems.find((item) => getPostcardId(item) === targetId);
+
+    if (fromHistory) {
+      applyPostcardSelection(fromHistory, { updateShareUrl: true });
+      goToStep(5);
+      return;
+    }
+
+    try {
+      const postcard = await requestJson(`/api/postcards/${targetId}`);
+      applyPostcardSelection(
+        {
+          ...postcard,
+          _id: postcard.id || postcard._id,
+        },
+        { updateShareUrl: true }
+      );
+      goToStep(5);
+    } catch (error) {
+      setErrorMessage(error.message);
+      goToStep(5);
+    }
+  }
+
+  function handleHistoryBack() {
+    const lastId = readLastPostcardId();
+
+    if (lastId) {
+      navigateToPostcard(lastId);
+      return;
+    }
+
+    navigateToHome();
+  }
+
+  function handleToggleSendEmail() {
+    setSendEmailExpanded((open) => !open);
+    setSendEmailStatus('idle');
+    setSendEmailMessage('');
+  }
+
+  async function loadArchive(selectFirstItem = false) {
+    setHistoryLoading(true);
+
+    try {
+      const postcards = await requestJson('/api/postcards?limit=100');
+
+      setHistoryItems(postcards);
+
+      if (selectFirstItem && postcards.length > 0) {
+        applyPostcardSelection(postcards[0]);
+      }
+    } catch (error) {
+      setErrorMessage(error.message);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }
+
+  async function generatePostcardForCity(rawCity, options = {}) {
+    const normalizedCity = (typeof rawCity === 'string' ? rawCity : '').trim();
+
+    if (!normalizedCity) {
+      const message = 'A city is required to create your postcard.';
+      setErrorMessage(message);
+      throw new Error(message);
+    }
+
+    const preferences =
+      options.preferences ?? getPreferenceLabels(selectedPreferences);
+    const requestBody = {
+      city: normalizedCity,
+      countryName: countryName.trim(),
+      userId: getOrCreateUserId(),
+      preferences,
+    };
+
+    if (options.regenerate) {
+      requestBody.regenerate = true;
+      requestBody.previousAnchorName = options.previousAnchorName || '';
+    }
+
+    setErrorMessage('');
+    setIsGenerating(true);
+
+    try {
+      const postcard = await requestJson('/api/postcards', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(requestBody),
+      });
+
+      const normalizedPostcard = {
+        ...postcard,
+        _id: postcard.id,
+      };
+
+      if (captionMode === 'write') {
+        const captionText = pendingCaption.trim();
+        applyPostcardSelection(normalizedPostcard, {
+          mode: 'write',
+          caption: captionText,
+        });
+
+        if (captionText) {
+          writeCaptionOverride(getPostcardId(normalizedPostcard), captionText);
+        }
+      } else {
+        applyPostcardSelection(normalizedPostcard, { mode: 'auto' });
+      }
+
+      const createdPostcardId = getPostcardId(normalizedPostcard);
+      writeLastPostcardId(createdPostcardId);
+      setLastPostcardId(createdPostcardId);
+
+      await loadArchive(false);
+      return normalizedPostcard;
+    } catch (error) {
+      setErrorMessage(error.message);
+      throw error;
+    } finally {
+      setIsGenerating(false);
+    }
+  }
+
+  useEffect(() => {
+    if (deepLinkHandledRef.current) {
+      return undefined;
+    }
+
+    let ignore = false;
+
+    async function loadSharedPostcard() {
+      const postcardId = new URLSearchParams(window.location.search).get('postcard');
+
+      if (!postcardId) {
+        return;
+      }
+
+      deepLinkHandledRef.current = true;
+
+      try {
+        const postcard = await requestJson(`/api/postcards/${postcardId}`);
+
+        if (ignore) {
+          return;
+        }
+
+        applyPostcardSelection(postcard);
+        await loadArchive(false);
+        setIsGenerating(false);
+        setStep(5);
+        setStepVisible(true);
+      } catch {
+        if (!ignore) {
+          setIsGenerating(false);
+          syncShareUrl('');
+        }
+      }
+    }
+
+    loadSharedPostcard();
+
+    return () => {
+      ignore = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (step !== 5) return;
+    const timeout = window.setTimeout(() => {
+      setIsGenerating(false);
+    }, 30000);
+    return () => window.clearTimeout(timeout);
+  }, [step]);
+
+  useEffect(() => {
+    if (step !== 0) {
+      return undefined;
+    }
+
+    function handleWheel(event) {
+      if (event.deltaY > 12) {
+        goToStep(1);
+      }
+    }
+
+    window.addEventListener('wheel', handleWheel, { passive: true });
+
+    return () => window.removeEventListener('wheel', handleWheel);
+  }, [step, goToStep]);
+
+  useEffect(() => {
+    if (step !== 4) {
+      generationRunRef.current = false;
+      return undefined;
+    }
+
+    if (generationRunRef.current || isGenerating) {
+      return undefined;
+    }
+
+    generationRunRef.current = true;
+    let cancelled = false;
+
+    async function createPostcard() {
+      try {
+        await generatePostcardForCity(resolvedCity);
+
+        if (!cancelled) {
+          goToStep(7);
+        }
+      } catch {
+        if (!cancelled) {
+          generationRunRef.current = false;
+          goToStep(3);
+        }
+      }
+    }
+
+    createPostcard();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [step]);
+
+  useEffect(() => {
+    if (step !== 6) {
+      return undefined;
+    }
+
+    loadArchive(false);
+
+    return undefined;
+  }, [step]);
+
+  useEffect(() => {
+    if (!selectedPostcardId || captionMode !== 'write') {
+      return undefined;
+    }
+
+    writeCaptionOverride(selectedPostcardId, draftCaption);
+  }, [draftCaption, selectedPostcardId, captionMode]);
+
+  useEffect(() => {
+    if (!selectedPostcardId || captionMode !== 'auto' || !selectedPostcard) {
+      return undefined;
+    }
+
+    if (!selectedPostcard.image?.base64) {
+      setAutoCaption('');
+      setAutoCaptionError('No photo yet — caption needs the generated image.');
+      return undefined;
+    }
+
+    if (selectedPostcard.caption) {
+      setAutoCaption(selectedPostcard.caption);
+      setAutoCaptionError('');
+      return undefined;
+    }
+
+    let cancelled = false;
+
+    async function loadCaption() {
+      setAutoCaptionLoading(true);
+      setAutoCaptionError('');
+
+      try {
+        const data = await requestJson(`/api/postcards/${selectedPostcardId}/generate-caption`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({}),
+        });
+
+        if (!cancelled) {
+          setAutoCaption(data.caption || '');
+          setSelectedPostcard((current) =>
+            current && getPostcardId(current) === selectedPostcardId
+              ? { ...current, caption: data.caption || '' }
+              : current
+          );
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setAutoCaptionError(error.message);
+          setAutoCaption('');
+        }
+      } finally {
+        if (!cancelled) {
+          setAutoCaptionLoading(false);
+        }
+      }
+    }
+
+    loadCaption();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedPostcardId, captionMode, selectedPostcard]);
+
+  useEffect(() => {
+    if (!selectedPostcardId) {
+      return;
+    }
+
+    setSendEmailExpanded(false);
+    setRecipientEmail('');
+    setSendEmailStatus('idle');
+    setSendEmailMessage('');
+  }, [selectedPostcardId]);
+
+  function togglePreference(preferenceId) {
+    setSelectedPreferences((current) =>
+      current.includes(preferenceId) ? [] : [preferenceId]
+    );
+  }
+
+  async function handleDetectLocation() {
+    setLocationLoading(true);
+    setLocationError('');
+    setDetectedLocationLabel('');
+    setErrorMessage('');
+
+    try {
+      const position = await getCurrentPositionAsync({
+        enableHighAccuracy: false,
+        timeout: 20000,
+        maximumAge: 300000,
+      });
+      const { latitude: lat, longitude: lon } = position.coords;
+      const location = await fetchLocationFromCoordinates(lat, lon);
+      const inputCity = pickAsciiAddressField(location.city);
+
+      if (!inputCity) {
+        throw new Error('NO_CITY');
+      }
+
+      setCity(inputCity);
+      setCountryName(location.country || '');
+      setDetectedLocationLabel(location.label || inputCity);
+    } catch {
+      setLocationError(LOCATION_UNAVAILABLE_MESSAGE);
+    } finally {
+      setLocationLoading(false);
+    }
+  }
+
+  function handleManualLocationContinue(event) {
+    event.preventDefault();
+    const manualCity = city.trim();
+
+    if (!manualCity) {
+      setLocationError('Enter a city to continue.');
+      return;
+    }
+
+    setGeoResolvedCity(manualCity);
+    setLocationError('');
+    goToStep(2);
+  }
+
+  function handleCityInputChange(value) {
+    setCity(value);
+    setDetectedLocationLabel('');
+    if (locationError === LOCATION_UNAVAILABLE_MESSAGE) {
+      setLocationError('');
+    }
+  }
+
+  function handleCreatePostcard() {
+    setErrorMessage('');
+    goToStep(4);
+  }
+
+  function handleChangeVibe() {
+    setIsGenerating(false);
+    if (!resolvedCity && selectedPostcard?.city) {
+      setCity(selectedPostcard.city);
+      setGeoResolvedCity(selectedPostcard.city);
+    }
+    setSelectedPreferences([]);
+    goToStep(2);
+  }
+
+  async function handleSameVibeNewSpot() {
+    try {
+      const cityToUse = (selectedPostcard?.city || resolvedCity || '').trim();
+
+      if (!cityToUse) {
+        setErrorMessage('A city is required to create your postcard.');
+        return;
+      }
+
+      const preferences =
+        selectedPostcard?.atmosphere?.preferences?.length > 0
+          ? selectedPostcard.atmosphere.preferences
+          : getPreferenceLabels(selectedPreferences);
+      const previousAnchorName = selectedPostcard?.atmosphere?.anchorLocation?.location || '';
+
+      await generatePostcardForCity(cityToUse, {
+        regenerate: true,
+        previousAnchorName,
+        preferences,
+      });
+      goToStep(5);
+    } catch {
+      // generatePostcardForCity already surfaces the error message
+    } finally {
+      setIsGenerating(false);
+    }
+  }
+
+  function confirmDelete(postcardId) {
+    setPendingDeleteId(postcardId);
+  }
+
+  async function handleDeletePostcard(postcardId) {
+    const previousItems = historyItems;
+    const wasSelected = selectedPostcardId === postcardId;
+
+    setPendingDeleteId(null);
+    setHistoryItems((current) => current.filter((item) => getPostcardId(item) !== postcardId));
+
+    if (wasSelected) {
+      setSelectedPostcard(null);
+      syncShareUrl('');
+    }
+
+    if (lastPostcardId === postcardId) {
+      clearLastPostcardId();
+      setLastPostcardId(null);
+    }
+
+    try {
+      await requestJson(`/api/postcards/${postcardId}`, {
+        method: 'DELETE',
+      });
+    } catch (error) {
+      setHistoryItems(previousItems);
+      setErrorMessage(error.message);
+    }
+  }
+
+  async function toggleFavorite(postcard) {
+    const postcardId = getPostcardId(postcard);
+    const nextFavorited = !postcard.isFavorited;
+    const previousItems = historyItems;
+    const previousSelected = selectedPostcard;
+
+    setHistoryItems((current) =>
+      current.map((item) =>
+        getPostcardId(item) === postcardId ? { ...item, isFavorited: nextFavorited } : item
+      )
+    );
+
+    if (selectedPostcardId === postcardId) {
+      setSelectedPostcard((current) =>
+        current ? { ...current, isFavorited: nextFavorited } : current
+      );
+    }
+
+    try {
+      await requestJson(`/api/postcards/${postcardId}/favorite`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ isFavorited: nextFavorited }),
+      });
+    } catch (error) {
+      setHistoryItems(previousItems);
+      setSelectedPostcard(previousSelected);
+      setErrorMessage(error.message);
+    }
+  }
+
+  function handleHistoryCitySelect(cityGroup) {
+    setSelectedHistoryCity(cityGroup);
+  }
+
+  function handleHistoryCityBack() {
+    setSelectedHistoryCity(null);
+  }
+
+  function handleViewCollectionFromMemory() {
+    if (selectedPostcard) {
+      setSelectedHistoryCity(
+        findCityGroupForPostcard(historyByCountry, selectedPostcard, normalizeCityName)
+      );
+    } else {
+      setSelectedHistoryCity(null);
+    }
+
+    goToStep(6);
+  }
+
+  function handleViewPostcardFromSuccess() {
+    goToStep(5);
+  }
+
+  function handleHistorySelect(postcard) {
+    const postcardId = getPostcardId(postcard);
+    const storedCaption = readCaptionOverride(postcardId);
+    const hasStoredWrite = storedCaption !== null;
+
+    applyPostcardSelection(postcard, {
+      mode: hasStoredWrite ? 'write' : 'auto',
+      caption: hasStoredWrite ? storedCaption : undefined,
+      updateShareUrl: false,
+    });
+  }
+
+  async function resolvePostcardImageDataUrl() {
+    if (postcardCaptureRef.current) {
+      await waitForPostcardImageReady(postcardCaptureRef.current);
+      const canvas = await capturePostcardElement(postcardCaptureRef.current);
+
+      return canvas.toDataURL('image/png');
+    }
+
+    if (selectedPostcard?.image?.base64 && selectedPostcard?.image?.mimeType) {
+      return `data:${selectedPostcard.image.mimeType};base64,${selectedPostcard.image.base64}`;
+    }
+
+    return '';
+  }
+
+  async function handleDownloadPostcard(cardElement, isFlipped) {
+    if (!cardElement || !selectedPostcard) {
+      return;
+    }
+
+    setDownloadLoading(true);
+    setErrorMessage('');
+
+    try {
+      await waitForPostcardCardReady(cardElement);
+      const canvas = await capturePostcardCardElement(cardElement, isFlipped);
+      const dataUrl = canvas.toDataURL('image/png');
+      downloadPostcardPng(dataUrl, buildPostcardDownloadFilename(selectedPostcard.city));
+    } catch (error) {
+      setErrorMessage(error.message || 'Failed to download postcard.');
+    } finally {
+      setDownloadLoading(false);
+    }
+  }
+
+  async function handleSendPostcardEmail(event) {
+    event.preventDefault();
+
+    if (!selectedPostcard) {
+      return;
+    }
+
+    const trimmed = recipientEmail.trim();
+
+    if (!trimmed) {
+      setSendEmailMessage('Enter a recipient email address.');
+      setSendEmailStatus('error');
+      return;
+    }
+
+    const simpleCheck = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+    if (!simpleCheck.test(trimmed)) {
+      setSendEmailMessage('Please enter a valid email address.');
+      setSendEmailStatus('error');
+      return;
+    }
+
+    setSendEmailStatus('sending');
+    setSendEmailMessage('');
+
+    try {
+      const postcardImageBase64 = await resolvePostcardImageDataUrl();
+
+      if (!postcardImageBase64) {
+        throw new Error('No postcard image is available to send yet.');
+      }
+
+      await requestJson('/api/send-postcard', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          recipientEmail: trimmed,
+          postcardImageBase64,
+          caption: displayCaption,
+          city: selectedPostcard.city,
+        }),
+      });
+
+      setSendEmailStatus('success');
+      setSendEmailMessage('Email sent.');
+    } catch (error) {
+      setSendEmailStatus('error');
+      setSendEmailMessage(error.message || 'Failed to send email.');
+    }
+  }
+
+  const stepClassName = `guided-step ${stepVisible ? 'guided-step--visible' : 'guided-step--fading'}`;
+  const historyBackPostcardId = readLastPostcardId();
+  const historyBackLabel = historyBackPostcardId ? 'Back to postcard' : 'Create a postcard';
+
+  return (
+    <div className="guided-app">
+      <div className="guided-app__grain" aria-hidden="true" />
+
+      {step === 0 ? (
+        <section className={stepClassName}>
+          <button
+            type="button"
+            className="button button--ghost guided-landing-history"
+            onClick={navigateToHistory}
+          >
+            View History
+          </button>
+          <div className="guided-step__inner">
+            <p className="guided-hero-line">Every city has a version that&apos;s yours.</p>
+            <button type="button" className="button button--ghost" onClick={() => goToStep(1)}>
+              Continue
+            </button>
+            <p className="guided-scroll-hint">Scroll to continue</p>
+          </div>
+        </section>
+      ) : null}
+
+      {step === 1 ? (
+        <section className={stepClassName}>
+          <div className="guided-step__inner">
+            <p className="guided-title">Where are you?</p>
+            <p className="guided-subline">Detect your location or type a city to begin.</p>
+            <form className="guided-field" onSubmit={handleManualLocationContinue}>
+              <span>City</span>
+              <div className="guided-city-input-row">
+                <input
+                  type="text"
+                  value={city}
+                  onChange={(event) => handleCityInputChange(event.target.value)}
+                  placeholder="Tokyo, Lisbon, Seattle..."
+                  autoComplete="off"
+                />
+                <button
+                  type="button"
+                  className="button button--ghost button--icon guided-location-button"
+                  aria-label="Detect location"
+                  disabled={locationLoading}
+                  onClick={handleDetectLocation}
+                >
+                  📍
+                </button>
+              </div>
+
+              {locationLoading ? (
+                <p className="guided-location-status" aria-live="polite">
+                  Detecting location...
+                </p>
+              ) : null}
+
+              {detectedLocationLabel && !locationLoading ? (
+                <p className="guided-location-pill" aria-live="polite">
+                  📍 {detectedLocationLabel}
+                </p>
+              ) : null}
+
+              {locationError ? (
+                <p className="guided-location-error" aria-live="polite">
+                  {locationError}
+                </p>
+              ) : null}
+
+              <button className="button button--primary" type="submit" disabled={locationLoading}>
+                Continue
+              </button>
+            </form>
+          </div>
+        </section>
+      ) : null}
+
+      {step === 2 ? (
+        <section className={stepClassName}>
+          <div className="guided-step__inner">
+            <p className="guided-title">What draws you in?</p>
+            <p className="guided-subline">Choose one. We will shape the mood around it.</p>
+            <div className="guided-card-grid">
+              {PREFERENCE_OPTIONS.map((option) => (
+                <button
+                  key={option.id}
+                  type="button"
+                  className={`guided-select-card ${
+                    selectedPreferences.includes(option.id) ? 'guided-select-card--active' : ''
+                  }`}
+                  aria-pressed={selectedPreferences.includes(option.id)}
+                  onClick={() => togglePreference(option.id)}
+                >
+                  <span className="guided-select-card__label">{option.label}</span>
+                </button>
+              ))}
+            </div>
+            {selectedPreferences.length > 0 ? (
+              <button type="button" className="button button--primary" onClick={() => goToStep(3)}>
+                Continue
+              </button>
+            ) : null}
+          </div>
+        </section>
+      ) : null}
+
+      {step === 3 ? (
+        <section className={stepClassName}>
+          <div className="guided-step__inner">
+            <p className="guided-title">How should the caption feel?</p>
+            <div className="guided-card-grid guided-card-grid--two">
+              <button
+                type="button"
+                className={`guided-select-card ${
+                  captionMode === 'write' ? 'guided-select-card--active' : ''
+                }`}
+                aria-pressed={captionMode === 'write'}
+                onClick={() => setCaptionMode('write')}
+              >
+                <span className="guided-select-card__label">I&apos;ll write it myself</span>
+              </button>
+              <button
+                type="button"
+                className={`guided-select-card ${
+                  captionMode === 'auto' ? 'guided-select-card--active' : ''
+                }`}
+                aria-pressed={captionMode === 'auto'}
+                onClick={() => setCaptionMode('auto')}
+              >
+                <span className="guided-select-card__label">Generate for me</span>
+              </button>
+            </div>
+
+            {captionMode === 'write' ? (
+              <div className="guided-caption-field">
+                <textarea
+                  className="guided-caption-input"
+                  value={pendingCaption}
+                  maxLength={CAPTION_MAX_LENGTH}
+                  onChange={(event) => setPendingCaption(event.target.value)}
+                  placeholder="A line for the back of the card..."
+                />
+                <p className="guided-caption-counter" aria-live="polite">
+                  {pendingCaption.length}/{CAPTION_MAX_LENGTH}
+                </p>
+              </div>
+            ) : null}
+
+            {errorMessage ? <p className="callout callout--error">{errorMessage}</p> : null}
+
+            <button
+              type="button"
+              className="button button--primary"
+              disabled={!resolvedCity}
+              onClick={handleCreatePostcard}
+            >
+              Create my postcard
+            </button>
+          </div>
+        </section>
+      ) : null}
+
+      {step === 4 ? (
+        <section className={stepClassName}>
+          <div className="guided-step__inner">
+            <p className="guided-loading guided-loading--pulse" aria-live="polite">
+              Creating your postcard...
+            </p>
+          </div>
+        </section>
+      ) : null}
+
+      {step === 7 ? (
+        <section className={stepClassName}>
+          <div className="guided-step__inner postcard-ready">
+            <p className="guided-title">Your postcard is ready</p>
+            <p className="postcard-ready__city">{selectedPostcard?.city}</p>
+            <div className="postcard-ready__stamp-row">
+              <p className="postcard-ready__subtitle">AI Stamp collected</p>
+              <AiCityStamp
+                aiStamp={selectedPostcard?.aiStamp}
+                cityName={selectedPostcard?.city}
+                category={selectedPostcardCategory}
+                size="sm"
+              />
+            </div>
+            <p className="postcard-ready__count">
+              {selectedCityPostcardCount} postcard{selectedCityPostcardCount === 1 ? '' : 's'}{' '}
+              collected
+            </p>
+            <div className="guided-actions postcard-ready__actions">
+              <button
+                type="button"
+                className="button button--primary"
+                onClick={handleViewPostcardFromSuccess}
+              >
+                View postcard
+              </button>
+              <button
+                type="button"
+                className="button button--ghost"
+                onClick={handleViewCollectionFromMemory}
+              >
+                View collection
+              </button>
+            </div>
+          </div>
+        </section>
+      ) : null}
+
+      {step === 5 ? (
+        <section className={stepClassName}>
+          <div className="guided-step__inner guided-postcard-layout">
+            {selectedPostcard ? (
+              <PostcardDetailLayout
+                postcard={selectedPostcard}
+                captureRef={postcardCaptureRef}
+                visualStyle={postcardVisualStyle}
+                imageSrc={postcardImageSrc}
+                displayCaption={displayCaption}
+                showCaptionOverlay={showCaptionOverlay}
+                autoCaptionLoading={autoCaptionLoading}
+                captionMode={captionMode}
+                autoCaptionError={autoCaptionError}
+                sendEmailExpanded={sendEmailExpanded}
+                onToggleSendEmail={handleToggleSendEmail}
+                onDownloadPostcard={handleDownloadPostcard}
+                downloadLoading={downloadLoading}
+                recipientEmail={recipientEmail}
+                onRecipientEmailChange={setRecipientEmail}
+                onSendEmail={handleSendPostcardEmail}
+                sendEmailStatus={sendEmailStatus}
+                sendEmailMessage={sendEmailMessage}
+                showCreationActions
+                onChangeVibe={handleChangeVibe}
+                onSameVibeNewSpot={handleSameVibeNewSpot}
+                onViewHistory={() => {
+                  setSelectedPostcard(null);
+                  goToStep(6);
+                }}
+                isGenerating={isGenerating}
+                detailCategory={detailCategory}
+                collectedNumber={selectedCollectedNumber}
+              />
+            ) : (
+              <p className="guided-muted">Your postcard is not ready yet.</p>
+            )}
+          </div>
+        </section>
+      ) : null}
+
+      {step === 6 ? (
+        <section className={stepClassName}>
+          <div className="guided-history">
+            <div className="guided-history__header">
+              <p className="guided-title">
+                {selectedHistoryCity ? selectedHistoryCity.cityName : 'Your postcard history'}
+              </p>
+              <button
+                type="button"
+                className="button button--ghost"
+                onClick={selectedHistoryCity ? handleHistoryCityBack : handleHistoryBack}
+              >
+                {selectedHistoryCity ? 'Back to collection' : historyBackLabel}
+              </button>
+            </div>
+
+            {historyLoading ? (
+              <p className="guided-muted">Loading postcards from memory...</p>
+            ) : selectedHistoryCity ? (
+              <div className="history-city-detail">
+                <div className="history-city-detail__header">
+                  <h2 className="history-city-detail__title">{selectedHistoryCity.cityName}</h2>
+                  <AiCityStamp
+                    aiStamp={selectedHistoryCity.aiStamp}
+                    cityName={selectedHistoryCity.cityName}
+                    category={selectedHistoryCity.category}
+                    size="sm"
+                  />
+                </div>
+                <p className="history-city-detail__meta">
+                  {selectedHistoryCity.postcardCount} postcard
+                  {selectedHistoryCity.postcardCount === 1 ? '' : 's'} in this city
+                </p>
+                <div className="guided-history-grid">
+                  {selectedHistoryCity.items.map((postcard) => (
+                    <HistoryPostcardCard
+                      key={getPostcardId(postcard)}
+                      postcard={postcard}
+                      pendingDeleteId={pendingDeleteId}
+                      onSelect={handleHistorySelect}
+                      onToggleFavorite={toggleFavorite}
+                      onConfirmDelete={confirmDelete}
+                      onDelete={handleDeletePostcard}
+                      onCancelDelete={() => setPendingDeleteId(null)}
+                    />
+                  ))}
+                </div>
+              </div>
+            ) : historyItems.length > 0 ? (
+              <div className="guided-history-groups">
+                {favoritedPostcards.length > 0 ? (
+                  <section className="history-favorites-group">
+                    <div className="history-favorites-group__header">
+                      <span className="history-favorites-group__name">
+                        <span className="history-favorites-group__heart" aria-hidden="true">
+                          ♥
+                        </span>{' '}
+                        Favorites
+                      </span>
+                      <span className="history-favorites-group__line" aria-hidden="true" />
+                    </div>
+                    <div className="guided-history-grid">
+                      {favoritedPostcards.map((postcard) => (
+                        <HistoryPostcardCard
+                          key={`favorite-${getPostcardId(postcard)}`}
+                          postcard={postcard}
+                          pendingDeleteId={pendingDeleteId}
+                          onSelect={handleHistorySelect}
+                          onToggleFavorite={toggleFavorite}
+                          onConfirmDelete={confirmDelete}
+                          onDelete={handleDeletePostcard}
+                          onCancelDelete={() => setPendingDeleteId(null)}
+                        />
+                      ))}
+                    </div>
+                  </section>
+                ) : null}
+
+                {historyByCountry.map((countryGroup) => (
+                  <section key={countryGroup.countryName} className="history-country-group">
+                    <div className="history-country-group__header">
+                      <span className="history-country-group__name">
+                        {countryGroup.countryName} {getCountryFlag(countryGroup.countryName)}
+                      </span>
+                      <span className="history-country-group__line" aria-hidden="true" />
+                    </div>
+                    <div className="history-city-card-grid">
+                      {countryGroup.cities.map((cityGroup) => (
+                        <HistoryCityCard
+                          key={`${countryGroup.countryName}-${cityGroup.cityName}`}
+                          cityGroup={cityGroup}
+                          onSelect={handleHistoryCitySelect}
+                        />
+                      ))}
+                    </div>
+                  </section>
+                ))}
+              </div>
+            ) : (
+              <p className="guided-muted">No postcards saved yet. Create your first one to begin.</p>
+            )}
+          </div>
+
+          {selectedPostcard ? (
+            <PostcardOverlay onClose={closeHistoryOverlay}>
+              <PostcardDetailLayout
+                postcard={selectedPostcard}
+                captureRef={postcardCaptureRef}
+                visualStyle={postcardVisualStyle}
+                imageSrc={postcardImageSrc}
+                displayCaption={displayCaption}
+                showCaptionOverlay={showCaptionOverlay}
+                autoCaptionLoading={autoCaptionLoading}
+                captionMode={captionMode}
+                autoCaptionError={autoCaptionError}
+                sendEmailExpanded={sendEmailExpanded}
+                onToggleSendEmail={handleToggleSendEmail}
+                onDownloadPostcard={handleDownloadPostcard}
+                downloadLoading={downloadLoading}
+                recipientEmail={recipientEmail}
+                onRecipientEmailChange={setRecipientEmail}
+                onSendEmail={handleSendPostcardEmail}
+                sendEmailStatus={sendEmailStatus}
+                sendEmailMessage={sendEmailMessage}
+                showCreationActions={false}
+                onChangeVibe={handleChangeVibe}
+                onSameVibeNewSpot={handleSameVibeNewSpot}
+                onViewHistory={() => goToStep(6)}
+                isGenerating={isGenerating}
+                detailCategory={detailCategory}
+                collectedNumber={selectedCollectedNumber}
+              />
+            </PostcardOverlay>
+          ) : null}
+        </section>
+      ) : null}
+    </div>
+  );
+}
+
+export default App;
+===== client/src/utils/collection.js
+export function getCountryFlag(countryName) {
+  const flags = {
+    China: '🇨🇳',
+    Japan: '🇯🇵',
+    'United States': '🇺🇸',
+    USA: '🇺🇸',
+    France: '🇫🇷',
+    Italy: '🇮🇹',
+    Spain: '🇪🇸',
+    Germany: '🇩🇪',
+    'United Kingdom': '🇬🇧',
+    UK: '🇬🇧',
+    Portugal: '🇵🇹',
+    Brazil: '🇧🇷',
+    Mexico: '🇲🇽',
+    Canada: '🇨🇦',
+    Australia: '🇦🇺',
+    India: '🇮🇳',
+    Thailand: '🇹🇭',
+    Vietnam: '🇻🇳',
+    'South Korea': '🇰🇷',
+    Singapore: '🇸🇬',
+  };
+
+  return flags[countryName] || '🌍';
+}
+
+const NON_LATIN_CITY_PATTERN = /[\u4e00-\u9fff\u3040-\u30ff\u3400-\u4dbf\uac00-\ud7af]/;
+
+export function isAsciiCityName(value) {
+  const text = String(value || '').trim();
+
+  return text.length > 0 && !NON_LATIN_CITY_PATTERN.test(text);
+}
+
+export function resolveCanonicalCityName(postcard, normalizeCityName) {
+  const candidates = [postcard?.aiStamp?.city, postcard?.city]
+    .map((value) => normalizeCityName(value))
+    .filter(Boolean);
+
+  const asciiCandidate = candidates.find(isAsciiCityName);
+
+  if (asciiCandidate) {
+    return asciiCandidate;
+  }
+
+  return candidates[0] || 'Unknown';
+}
+
+export function resolveCountryName(postcard) {
+  const candidates = [postcard?.countryName, postcard?.aiStamp?.country]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean);
+
+  return candidates.find((name) => name !== 'Unknown') || '';
+}
+
+function buildCityCountryHints(postcards, normalizeCityName) {
+  const hints = new Map();
+
+  for (const postcard of postcards) {
+    const cityName = resolveCanonicalCityName(postcard, normalizeCityName);
+    const countryName = resolveCountryName(postcard);
+
+    if (cityName && countryName && !hints.has(cityName)) {
+      hints.set(cityName, countryName);
+    }
+  }
+
+  return hints;
+}
+
+function resolveCategoryFromPostcard(postcard) {
+  const preference = postcard?.atmosphere?.preferences?.[0];
+
+  if (!preference) {
+    return 'landmarks';
+  }
+
+  const labelMap = {
+    Landmarks: 'landmarks',
+    Food: 'food',
+    'Quiet Moments': 'quiet',
+    Nightlife: 'nightlife',
+    Nature: 'nature',
+  };
+
+  return labelMap[preference] || String(preference).toLowerCase();
+}
+
+export function groupPostcardsByCountryAndCity(postcards, normalizeCityName) {
+  const cityCountryHints = buildCityCountryHints(postcards, normalizeCityName);
+  const countries = new Map();
+
+  for (const postcard of postcards) {
+    if (postcard.isFavorited) {
+      continue;
+    }
+
+    const cityName = resolveCanonicalCityName(postcard, normalizeCityName);
+    let countryName = resolveCountryName(postcard) || cityCountryHints.get(cityName) || '';
+
+    if (!countryName) {
+      continue;
+    }
+
+    if (!countries.has(countryName)) {
+      countries.set(countryName, new Map());
+    }
+
+    const cityMap = countries.get(countryName);
+
+    if (!cityMap.has(cityName)) {
+      cityMap.set(cityName, []);
+    }
+
+    cityMap.get(cityName).push(postcard);
+  }
+
+  return Array.from(countries.entries())
+    .map(([countryName, cityMap]) => {
+      const cities = Array.from(cityMap.entries())
+        .map(([cityName, items]) => {
+          const sortedItems = [...items].sort(
+            (left, right) => new Date(right.createdAt) - new Date(left.createdAt)
+          );
+          const latestAt = sortedItems.reduce((max, item) => {
+            const createdAt = new Date(item.createdAt).getTime();
+            return Number.isNaN(createdAt) ? max : Math.max(max, createdAt);
+          }, 0);
+          const aiStamp = sortedItems.find((item) => item.aiStamp)?.aiStamp || null;
+          const category = resolveCategoryFromPostcard(sortedItems[0]);
+
+          return {
+            cityName,
+            countryName,
+            items: sortedItems,
+            latestAt,
+            aiStamp,
+            category,
+            postcardCount: sortedItems.length,
+          };
+        })
+        .sort((left, right) => right.latestAt - left.latestAt);
+
+      const latestAt = cities.reduce((max, city) => Math.max(max, city.latestAt), 0);
+
+      return {
+        countryName,
+        cities,
+        latestAt,
+      };
+    })
+    .filter((country) => country.countryName && country.countryName !== 'Unknown')
+    .filter((country) => country.cities.length > 0)
+    .sort((left, right) => right.latestAt - left.latestAt);
+}
+
+export function countPostcardsForCity(postcards, cityName, normalizeCityName) {
+  const normalizedTarget = resolveCanonicalCityName({ city: cityName }, normalizeCityName);
+
+  return postcards.filter(
+    (postcard) =>
+      resolveCanonicalCityName(postcard, normalizeCityName) === normalizedTarget &&
+      !postcard.isFavorited
+  ).length;
+}
+
+export function formatMonthYear(value) {
+  const date = value ? new Date(value) : new Date();
+
+  if (Number.isNaN(date.getTime())) {
+    return 'Unknown';
+  }
+
+  return new Intl.DateTimeFormat('en-US', { month: 'short', year: 'numeric' }).format(date);
+}
+
+export function findCityGroupForPostcard(historyByCountry, postcard, normalizeCityName) {
+  const targetCity = resolveCanonicalCityName(postcard, normalizeCityName);
+
+  for (const countryGroup of historyByCountry) {
+    const cityGroup = countryGroup.cities.find((group) => group.cityName === targetCity);
+
+    if (cityGroup) {
+      return cityGroup;
+    }
+  }
+
+  return null;
+}
+===== client/src/components/AiCityStamp.jsx
+import './AiCityStamp.css';
+
+const DEFAULT_PALETTE = {
+  primary: '#b8845a',
+  accent: '#8f4f45',
+  ink: '#4a3428',
+};
+
+const CATEGORY_ICONS = {
+  landmarks: '🏛',
+  food: '🍜',
+  quiet: '☕',
+  nightlife: '🌃',
+  nature: '🌿',
+};
+
+const CATEGORY_LABELS = {
+  landmarks: 'Landmarks',
+  food: 'Food',
+  quiet: 'Quiet',
+  nightlife: 'Nightlife',
+  nature: 'Nature',
+};
+
+function parseColorPalette(colorPalette) {
+  const paletteText = String(colorPalette || '').toLowerCase();
+  const paletteMap = {
+    amber: '#c99257',
+    gold: '#c99257',
+    brown: '#6b4a34',
+    red: '#9f4c42',
+    rust: '#9f4c42',
+    green: '#4d6b5f',
+    blue: '#50657b',
+    teal: '#4d6b5f',
+    cream: '#f0dcc2',
+    sand: '#d4a574',
+    charcoal: '#2a211c',
+    navy: '#1d2334',
+  };
+
+  const matches = Object.entries(paletteMap)
+    .filter(([keyword]) => paletteText.includes(keyword))
+    .map(([, color]) => color);
+
+  if (matches.length >= 2) {
+    return {
+      primary: matches[0],
+      accent: matches[1],
+      ink: matches[2] || DEFAULT_PALETTE.ink,
+    };
+  }
+
+  return DEFAULT_PALETTE;
+}
+
+function formatStampDate(value) {
+  const date = value ? new Date(value) : new Date();
+
+  if (Number.isNaN(date.getTime())) {
+    return new Intl.DateTimeFormat('en-US', { month: 'short', year: 'numeric' })
+      .format(new Date())
+      .toUpperCase()
+      .replace(' ', ' ');
+  }
+
+  return new Intl.DateTimeFormat('en-US', { month: 'short', year: 'numeric' })
+    .format(date)
+    .toUpperCase()
+    .replace(' ', ' ');
+}
+
+function normalizeCategoryId(category) {
+  const value = String(category || '').trim().toLowerCase();
+
+  if (CATEGORY_ICONS[value]) {
+    return value;
+  }
+
+  const labelMap = {
+    landmarks: 'landmarks',
+    food: 'food',
+    'quiet moments': 'quiet',
+    quiet: 'quiet',
+    nightlife: 'nightlife',
+    nature: 'nature',
+  };
+
+  return labelMap[value] || 'landmarks';
+}
+
+function resolveCategoryLabel(categoryId) {
+  return CATEGORY_LABELS[categoryId] || CATEGORY_LABELS.landmarks;
+}
+
+function resolveCategoryIcon(categoryId) {
+  return CATEGORY_ICONS[categoryId] || CATEGORY_ICONS.landmarks;
+}
+
+function buildFallbackStamp(cityName) {
+  return {
+    city: cityName || 'Unknown',
+    country: 'Unknown',
+    colorPalette: 'warm amber, muted red, deep brown',
+    createdAt: null,
+  };
+}
+
+export default function AiCityStamp({
+  aiStamp,
+  cityName = '',
+  category = 'landmarks',
+  size = 'badge',
+  className = '',
+}) {
+  const stamp = aiStamp || buildFallbackStamp(cityName);
+  const colors = parseColorPalette(stamp.colorPalette);
+  const categoryId = normalizeCategoryId(category);
+  const stampCity = String(stamp.city || cityName || 'Unknown').toUpperCase();
+  const stampDate = formatStampDate(stamp.createdAt);
+  const categoryLabel = resolveCategoryLabel(categoryId);
+  const categoryIcon = resolveCategoryIcon(categoryId);
+  const sizeClass =
+    size === 'sm' ? 'ai-city-stamp--sm' : size === 'md' ? 'ai-city-stamp--md' : 'ai-city-stamp--badge';
+
+  return (
+    <div
+      className={`ai-city-stamp ${sizeClass} ${className}`.trim()}
+      style={{
+        '--stamp-primary': colors.primary,
+        '--stamp-accent': colors.accent,
+        '--stamp-ink': colors.ink,
+      }}
+      aria-label={`Collection badge for ${stampCity}`}
+    >
+      <svg className="ai-city-stamp__svg" viewBox="0 0 80 80" role="img" aria-hidden="true">
+        <circle cx="40" cy="40" r="36" className="ai-city-stamp__ring" />
+        <circle cx="40" cy="40" r="31" className="ai-city-stamp__face" />
+        <text x="40" y="18" textAnchor="middle" className="ai-city-stamp__city">
+          {stampCity.length > 10 ? `${stampCity.slice(0, 10)}…` : stampCity}
+        </text>
+        <text x="40" y="42" textAnchor="middle" className="ai-city-stamp__icon">
+          {categoryIcon}
+        </text>
+        <text x="40" y="56" textAnchor="middle" className="ai-city-stamp__category">
+          {categoryLabel}
+        </text>
+        <text x="40" y="68" textAnchor="middle" className="ai-city-stamp__date">
+          {stampDate}
+        </text>
+      </svg>
+    </div>
+  );
+}
+
+export {
+  buildFallbackStamp,
+  formatStampDate,
+  normalizeCategoryId,
+  resolveCategoryLabel,
+};
+===== client/src/components/PostcardDetailPanel.jsx
+import { useEffect, useState } from 'react';
+import './PostcardDetailPanel.css';
+
+const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000').replace(
+  /\/$/,
+  ''
+);
+
+const VALID_CATEGORIES = new Set(['landmarks', 'food', 'nightlife', 'nature', 'quiet']);
+
+const CATEGORY_EYEBROWS = {
+  landmarks: 'Why this place',
+  food: 'The taste in this image',
+  nightlife: 'City character after dark',
+  nature: 'How this city breathes',
+  quiet: 'Small moments',
+};
+
+async function fetchDetailPanel(city, category, anchorLocation) {
+  const response = await fetch(`${API_BASE}/api/postcards/detail-panel`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ city, category, anchorLocation }),
+  });
+
+  const isJson = response.headers.get('content-type')?.includes('application/json');
+  const payload = isJson ? await response.json() : null;
+
+  if (!response.ok || !payload?.success) {
+    throw new Error(payload?.error || 'Could not load detail panel.');
+  }
+
+  return payload.data.content;
+}
+
+function normalizeBody(body) {
+  if (Array.isArray(body)) {
+    return body.map((paragraph) => String(paragraph).trim()).filter(Boolean);
+  }
+
+  if (typeof body === 'string' && body.trim()) {
+    return [body.trim()];
+  }
+
+  return [];
+}
+
+function DetailEyebrow({ category, content }) {
+  return <p className="detail-panel__eyebrow">{content?.eyebrow || CATEGORY_EYEBROWS[category]}</p>;
+}
+
+function DetailHeadline({ children }) {
+  return <h2 className="detail-panel__headline">{children}</h2>;
+}
+
+function DetailBody({ paragraphs }) {
+  return paragraphs.map((paragraph) => (
+    <p key={paragraph} className="detail-panel__body">
+      {paragraph}
+    </p>
+  ));
+}
+
+function MetaGrid({ items = [] }) {
+  if (!items.length) {
+    return null;
+  }
+
+  return (
+    <div className="detail-panel__meta">
+      {items.map((item) => (
+        <div key={`${item.label}-${item.value}`}>
+          <span className="detail-panel__meta-label">{item.label}</span>
+          <span className="detail-panel__meta-value">{item.value}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function DetailQuote({ children }) {
+  if (!children) {
+    return null;
+  }
+
+  return <blockquote className="detail-panel__quote">{children}</blockquote>;
+}
+
+function TimeFragments({ fragments = [] }) {
+  if (!fragments.length) {
+    return null;
+  }
+
+  return (
+    <div className="detail-panel__fragments">
+      {fragments.map((fragment) => (
+        <div key={fragment.label}>
+          <span className="detail-panel__fragment-label">{fragment.label}</span>
+          <p className="detail-panel__fragment-text">{fragment.text}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function AtmosphereBars({ bars = [] }) {
+  if (!bars.length) {
+    return null;
+  }
+
+  return (
+    <div className="detail-panel__bars">
+      {bars.map((bar) => {
+        const value = Math.max(0, Math.min(100, Number(bar.value) || 0));
+
+        return (
+          <div key={bar.label}>
+            <div className="detail-panel__bar-row">
+              <span>{bar.label}</span>
+              <span>{value}</span>
+            </div>
+            <div className="detail-panel__bar-track">
+              <div className="detail-panel__bar-fill" style={{ width: `${value}%` }} />
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function DetailTags({ tags = [] }) {
+  if (!tags.length) {
+    return null;
+  }
+
+  return (
+    <div className="detail-panel__tags">
+      {tags.map((tag) => (
+        <span key={tag} className="detail-panel__tag">
+          {tag}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function LandmarksLayout({ content, category }) {
+  return (
+    <>
+      <DetailEyebrow category={category} content={content} />
+      <DetailHeadline>{content.headline}</DetailHeadline>
+      <DetailBody paragraphs={normalizeBody(content.body)} />
+      <MetaGrid items={content.meta} />
+      <DetailQuote>{content.quote}</DetailQuote>
+    </>
+  );
+}
+
+function FoodLayout({ content, category }) {
+  return (
+    <>
+      <DetailEyebrow category={category} content={content} />
+      <DetailHeadline>{content.headline}</DetailHeadline>
+      <DetailBody paragraphs={normalizeBody(content.body)} />
+      <AtmosphereBars bars={content.atmosphere} />
+      <DetailQuote>{content.quote}</DetailQuote>
+      <DetailTags tags={content.tags} />
+    </>
+  );
+}
+
+function NightlifeLayout({ content, category }) {
+  return (
+    <>
+      <DetailEyebrow category={category} content={content} />
+      <DetailHeadline>{content.headline}</DetailHeadline>
+      <DetailBody paragraphs={normalizeBody(content.body)} />
+      <TimeFragments fragments={content.timeFragments} />
+      <DetailQuote>{content.quote}</DetailQuote>
+    </>
+  );
+}
+
+function NatureLayout({ content, category }) {
+  return (
+    <>
+      <DetailEyebrow category={category} content={content} />
+      <DetailHeadline>{content.headline}</DetailHeadline>
+      <DetailBody paragraphs={normalizeBody(content.body)} />
+      <MetaGrid items={content.meta} />
+    </>
+  );
+}
+
+function QuietLayout({ content, category }) {
+  return (
+    <>
+      <DetailEyebrow category={category} content={content} />
+      <DetailHeadline>The city between the city</DetailHeadline>
+      <DetailBody paragraphs={normalizeBody(content.body)} />
+      <TimeFragments fragments={content.timeFragments} />
+      <DetailQuote>{content.quote}</DetailQuote>
+    </>
+  );
+}
+
+function getPostcardMetaItems(content) {
+  if (content.meta?.length) {
+    return content.meta;
+  }
+
+  if (content.timeFragments?.length) {
+    return content.timeFragments.map((fragment) => ({
+      label: fragment.label,
+      value: fragment.text,
+    }));
+  }
+
+  return [];
+}
+
+function PostcardMoodDetailsContent({ category, content }) {
+  const paragraphs = normalizeBody(content.body);
+  const metaItems = getPostcardMetaItems(content);
+  const headline = category === 'quiet' ? 'The city between the city' : content.headline;
+
+  return (
+    <>
+      <DetailEyebrow category={category} content={content} />
+      <DetailHeadline>{headline}</DetailHeadline>
+      {paragraphs.length > 0 ? <DetailBody paragraphs={paragraphs} /> : null}
+      {metaItems.length > 0 ? <MetaGrid items={metaItems} /> : null}
+      {!metaItems.length && content.atmosphere?.length ? (
+        <AtmosphereBars bars={content.atmosphere} />
+      ) : null}
+    </>
+  );
+}
+
+function CategoryLayout({ category, content, layout = 'full' }) {
+  if (layout === 'postcard') {
+    return <PostcardMoodDetailsContent category={category} content={content} />;
+  }
+
+  switch (category) {
+    case 'landmarks':
+      return <LandmarksLayout content={content} category={category} />;
+    case 'food':
+      return <FoodLayout content={content} category={category} />;
+    case 'nightlife':
+      return <NightlifeLayout content={content} category={category} />;
+    case 'nature':
+      return <NatureLayout content={content} category={category} />;
+    case 'quiet':
+      return <QuietLayout content={content} category={category} />;
+    default:
+      return null;
+  }
+}
+
+export function preferenceToCategory(preferenceIds = [], atmospherePreferences = []) {
+  if (preferenceIds.length > 0) {
+    const id = preferenceIds[0];
+
+    if (VALID_CATEGORIES.has(id)) {
+      return id;
+    }
+  }
+
+  const labelMap = {
+    Landmarks: 'landmarks',
+    Food: 'food',
+    'Quiet Moments': 'quiet',
+    Nightlife: 'nightlife',
+    Nature: 'nature',
+  };
+
+  if (atmospherePreferences.length > 0) {
+    return labelMap[atmospherePreferences[0]] || null;
+  }
+
+  return null;
+}
+
+export default function PostcardDetailPanel({
+  category,
+  city,
+  anchorLocation,
+  layout = 'full',
+  onContentLoaded,
+}) {
+  const [content, setContent] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (!category || !city || !VALID_CATEGORIES.has(category) || !anchorLocation?.location) {
+      setContent(null);
+      setLoading(false);
+      setError(anchorLocation?.location ? '' : 'No anchor location for this postcard.');
+      return undefined;
+    }
+
+    let cancelled = false;
+
+    async function loadPanel() {
+      setLoading(true);
+      setError('');
+      setContent(null);
+
+      try {
+        const data = await fetchDetailPanel(city, category, anchorLocation);
+
+        if (!cancelled) {
+          setContent(data);
+        }
+      } catch (loadError) {
+        if (!cancelled) {
+          setError(loadError.message);
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    }
+
+    loadPanel();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [category, city, anchorLocation]);
+
+  useEffect(() => {
+    if (!content || !onContentLoaded) {
+      return;
+    }
+
+    onContentLoaded(content);
+  }, [content, onContentLoaded]);
+
+  if (!category || !VALID_CATEGORIES.has(category)) {
+    return null;
+  }
+
+  const panelClassName = [
+    'detail-panel',
+    layout === 'postcard' ? 'detail-panel--postcard' : '',
+    loading ? 'detail-panel--loading' : '',
+    error ? 'detail-panel--error' : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+
+  if (loading) {
+    return (
+      <aside className={panelClassName} aria-live="polite">
+        <p className="detail-panel__status">Composing details...</p>
+      </aside>
+    );
+  }
+
+  if (error) {
+    return (
+      <aside className={panelClassName} aria-live="polite">
+        <p className="detail-panel__status detail-panel__status--error">{error}</p>
+      </aside>
+    );
+  }
+
+  if (!content) {
+    return null;
+  }
+
+  return (
+    <aside className={panelClassName}>
+      <CategoryLayout category={category} content={content} layout={layout} />
+    </aside>
+  );
+}

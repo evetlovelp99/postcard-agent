@@ -1,0 +1,74 @@
+.ai-city-stamp {
+  --stamp-primary: #b8845a;
+  --stamp-accent: #8f4f45;
+  --stamp-ink: #4a3428;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.ai-city-stamp__svg {
+  width: 56px;
+  height: 56px;
+  overflow: visible;
+}
+
+.ai-city-stamp--sm .ai-city-stamp__svg {
+  width: 48px;
+  height: 48px;
+}
+
+.ai-city-stamp--md .ai-city-stamp__svg {
+  width: 64px;
+  height: 64px;
+}
+
+.ai-city-stamp__ring {
+  fill: none;
+  stroke: var(--stamp-accent);
+  stroke-width: 2;
+  opacity: 0.72;
+}
+
+.ai-city-stamp__face {
+  fill: rgba(248, 237, 220, 0.94);
+  stroke: var(--stamp-ink);
+  stroke-width: 1;
+  opacity: 0.96;
+}
+
+.ai-city-stamp__city {
+  fill: var(--stamp-ink);
+  font-size: 6px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+}
+
+.ai-city-stamp__icon {
+  font-size: 14px;
+}
+
+.ai-city-stamp__category {
+  fill: var(--stamp-accent);
+  font-size: 5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.ai-city-stamp__date {
+  fill: var(--stamp-ink);
+  font-size: 5px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  opacity: 0.72;
+}
+
+.ai-city-stamp--sm .ai-city-stamp__icon {
+  font-size: 12px;
+}
+
+.ai-city-stamp--md .ai-city-stamp__icon {
+  font-size: 16px;
+}
