@@ -7,3 +7,6 @@ client/node_modules/
 !.env.example
 !client/.env.example
 npm-debug.log*
+.DS_Store
+**/.DS_Store
+review.txt
