@@ -35,8 +35,8 @@ The React frontend calls the Express JSON API and sends a browser-generated user
 ### Clone and install
 
 ```bash
-git clone https://github.com/evetlovelp99/postcard--agent.git
-cd postcard--agent
+git clone https://github.com/evetlovelp99/postcard-agent.git
+cd postcard-agent
 npm install
 npm --prefix client install
 cp .env.example .env
@@ -77,7 +77,7 @@ Open the URL printed by Vite. The backend defaults to `http://localhost:3000`; i
 ## Project structure
 
 ```text
-postcard--agent/
+postcard-agent/
 ├── client/
 │   ├── public/             # Static assets
 │   ├── src/
