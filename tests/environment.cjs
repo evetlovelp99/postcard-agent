@@ -21,7 +21,7 @@ module.exports = async () => {
     VITE_API_BASE_URL: 'test-placeholder',
     DOTENV_CONFIG_QUIET: 'true',
     MONGOMS_VERSION: '7.0.41',
-    MONGOMS_DOWNLOAD_DIR: path.resolve(__dirname, '../node_modules/.cache/mongodb-binaries'),
+    MONGOMS_DOWNLOAD_DIR: process.env.MONGOMS_DOWNLOAD_DIR || path.resolve(__dirname, '../node_modules/.cache/mongodb-binaries'),
   };
   Object.assign(process.env, testEnvironment);
 
