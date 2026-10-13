@@ -13,9 +13,7 @@ async function getMongoClient() {
   if (!clientPromise) {
     const client = new MongoClient(process.env.MONGODB_URI, {
       serverApi: ServerApiVersion.v1,
-      tls: true,
-      tlsAllowInvalidCertificates: true,
-      tlsAllowInvalidHostnames: true,
+      tls: process.env.MONGODB_TLS !== 'false',
     });
 
     clientPromise = client.connect().catch((error) => {
