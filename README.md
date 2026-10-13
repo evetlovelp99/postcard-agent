@@ -135,7 +135,7 @@ npm ci
 npm test
 ```
 
-Jest and supertest exercise the Express backend against an isolated in-memory MongoDB process, including real indexes. Model SDKs and Resend are mocked; test environment variables replace local configuration, and non-local network access is blocked after MongoDB setup. No real model keys, email credentials, or external database are used. The first run may download a MongoDB binary into `node_modules/.cache/mongodb-binaries`; subsequent runs reuse it. Tests cover image and caption fallbacks, city stamp reuse and uniqueness, per-user recent memory, and malformed or incomplete atmosphere responses.
+Jest and supertest exercise the Express backend against an isolated in-memory MongoDB 7.0.41 process, including real indexes, matching the major version of the `mongo:7` Compose service. The binary version is pinned with `MONGOMS_VERSION` in `tests/environment.cjs`. Model SDKs and Resend are mocked; test environment variables replace local configuration, and non-local network access is blocked after MongoDB setup. No real model keys, email credentials, or external database are used. The first run may download a MongoDB binary into `node_modules/.cache/mongodb-binaries`; subsequent runs reuse it. Tests cover image and caption fallbacks, city stamp reuse and uniqueness, per-user recent memory, and malformed or incomplete atmosphere responses.
 
 ## Known issues
 
